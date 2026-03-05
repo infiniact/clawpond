@@ -1,0 +1,9 @@
+{
+  "name": "clawpond",
+  "private": true,
+  "scripts": {
+    "dev": "pnpm --filter @clawpond/desktop dev",
+    "build": "pnpm --filter @clawpond/desktop build",
+    "tauri": "pnpm --filter @clawpond/desktop tauri"
+  }
+}
