@@ -1,0 +1,14 @@
+[package]
+name = "claw-updater"
+description = "Update manager - check, download, and apply OpenClaw component updates"
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+log.workspace = true
+thiserror.workspace = true

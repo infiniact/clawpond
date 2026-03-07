@@ -1,3 +1,5 @@
+"use client";
+
 const iconProps = {
   xmlns: "http://www.w3.org/2000/svg",
   fill: "none",
@@ -300,5 +302,133 @@ export function IconSpinner({ size = 16, className }: { size?: number; className
         d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
       />
     </svg>
+  );
+}
+
+export function IconDownload({ size, className }: { size?: number; className?: string }) {
+  return (
+    <Icon size={size} className={className}>
+      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+      <polyline points="7 10 12 15 17 10" />
+      <line x1="12" y1="15" x2="12" y2="3" />
+    </Icon>
+  );
+}
+
+export function IconFolder({ size, className }: { size?: number; className?: string }) {
+  return (
+    <Icon size={size} className={className}>
+      <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+    </Icon>
+  );
+}
+
+export function IconGlobe({ size, className }: { size?: number; className?: string }) {
+  return (
+    <Icon size={size} className={className}>
+      <circle cx="12" cy="12" r="10" />
+      <line x1="2" y1="12" x2="22" y2="12" />
+      <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
+    </Icon>
+  );
+}
+
+export function IconLayers({ size, className }: { size?: number; className?: string }) {
+  return (
+    <Icon size={size} className={className}>
+      <polygon points="12 2 2 7 12 12 22 7 12 2" />
+      <polyline points="2 17 12 22 22 17" />
+      <polyline points="2 12 12 17 22 12" />
+    </Icon>
+  );
+}
+
+export function IconHash({ size, className }: { size?: number; className?: string }) {
+  return (
+    <Icon size={size} className={className}>
+      <line x1="4" y1="9" x2="20" y2="9" />
+      <line x1="4" y1="15" x2="20" y2="15" />
+      <line x1="10" y1="3" x2="8" y2="21" />
+      <line x1="16" y1="3" x2="14" y2="21" />
+    </Icon>
+  );
+}
+
+export function IconZap({ size, className }: { size?: number; className?: string }) {
+  return (
+    <Icon size={size} className={className}>
+      <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
+    </Icon>
+  );
+}
+
+export function IconCheck({ size, className }: { size?: number; className?: string }) {
+  return (
+    <Icon size={size} className={className}>
+      <polyline points="20 6 9 17 4 12" />
+    </Icon>
+  );
+}
+
+export function IconArrowRight({ size, className }: { size?: number; className?: string }) {
+  return (
+    <Icon size={size} className={className}>
+      <line x1="5" y1="12" x2="19" y2="12" />
+      <polyline points="12 5 19 12 12 19" />
+    </Icon>
+  );
+}
+
+export function IconSend({ size, className }: { size?: number; className?: string }) {
+  return (
+    <Icon size={size} className={className}>
+      <line x1="22" y1="2" x2="11" y2="13" />
+      <polygon points="22 2 15 22 11 13 2 9 22 2" />
+    </Icon>
+  );
+}
+
+export function IconPlay({ size, className }: { size?: number; className?: string }) {
+  return (
+    <Icon size={size} className={className}>
+      <polygon points="5 3 19 12 5 21 5 3" />
+    </Icon>
+  );
+}
+
+export function IconStop({ size, className }: { size?: number; className?: string }) {
+  return (
+    <Icon size={size} className={className}>
+      <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+    </Icon>
+  );
+}
+
+export function IconChevronDown({ size, className }: { size?: number; className?: string }) {
+  return (
+    <Icon size={size} className={className}>
+      <polyline points="6 9 12 15 18 9" />
+    </Icon>
+  );
+}
+
+export function IconImage({ size, className }: { size?: number; className?: string }) {
+  return (
+    <Icon size={size} className={className}>
+      <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+      <circle cx="8.5" cy="8.5" r="1.5" />
+      <polyline points="21 15 16 10 5 21" />
+    </Icon>
+  );
+}
+
+export function IconMic({ size, className }: { size?: number; className?: string }) {
+  return (
+    <Icon size={size} className={className}>
+      <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
+      <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+      <line x1="12" y1="19" x2="12" y2="23" />
+      <line x1="8" y1="23" x2="16" y2="23" />
+    </Icon>
   );
 }

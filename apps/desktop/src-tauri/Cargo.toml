@@ -1,25 +1,30 @@
 [package]
 name = "clawpond"
-version = "0.1.0"
-description = "Clawpond - OpenClaw Desktop Client"
-authors = ["INFINIACT CO., LTD"]
-license = "MIT"
-repository = ""
-edition = "2021"
-rust-version = "1.77.2"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+description = "ClawPond - OpenClaw Desktop Client"
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
 
 [lib]
 name = "clawpond_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
-tauri-build = { version = "2.5.6" }
+tauri-build = { version = "2.5.6", features = [] }
 
 [dependencies]
-serde_json = "1.0"
-serde = { version = "1.0", features = ["derive"] }
-log = "0.4"
-tauri = { version = "2.10.3" }
+serde.workspace = true
+serde_json.workspace = true
+log.workspace = true
+tauri.workspace = true
 tauri-plugin-log = "2"
+
+clawking = { path = "../../../crates/clawking" }
+claw-spawner = { path = "../../../crates/claw-spawner" }
+claw-export = { path = "../../../crates/claw-export" }
+claw-ui-bridge = { path = "../../../crates/claw-ui-bridge" }
+claw-updater = { path = "../../../crates/claw-updater" }
+rfd = "0.15"
+url = "2"

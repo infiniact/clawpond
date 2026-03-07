@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <!-- Clip regions for interlocking effect -->
+    <clipPath id="clip-upper">
+      <polygon points="0,0 512,0 512,418 0,94"/>
+    </clipPath>
+    <clipPath id="clip-lower">
+      <polygon points="0,94 512,418 512,512 0,512"/>
+    </clipPath>
+  </defs>
+
+  <!-- Yellow C-arc: back portion (behind cyan) -->
+  <circle cx="294" cy="196" r="104" fill="none" stroke="#FBB034" stroke-width="52"
+    stroke-dasharray="490.09 163.36" stroke-dashoffset="108.91" stroke-linecap="round"
+    clip-path="url(#clip-lower)"/>
+
+  <!-- Cyan C-arc: full -->
+  <circle cx="218" cy="316" r="104" fill="none" stroke="#2EC4D4" stroke-width="52"
+    stroke-dasharray="490.09 163.36" stroke-dashoffset="435.64" stroke-linecap="round"/>
+
+  <!-- Yellow C-arc: front portion (in front of cyan) -->
+  <circle cx="294" cy="196" r="104" fill="none" stroke="#FBB034" stroke-width="52"
+    stroke-dasharray="490.09 163.36" stroke-dashoffset="108.91" stroke-linecap="round"
+    clip-path="url(#clip-upper)"/>
+
+  <!-- Yellow dot -->
+  <circle cx="280" cy="228" r="22" fill="#FBB034"/>
+
+  <!-- Cyan dot -->
+  <circle cx="232" cy="284" r="25" fill="#2EC4D4"/>
+</svg>

@@ -1,0 +1,17 @@
+[package]
+name = "claw-export"
+description = "Pond snapshot - export/import the entire ClawPond configuration for backup and migration"
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+log.workspace = true
+thiserror.workspace = true
+clawking = { path = "../clawking" }
+claw-spawner = { path = "../claw-spawner" }
+claw-updater = { path = "../claw-updater" }

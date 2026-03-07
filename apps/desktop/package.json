@@ -7,7 +7,10 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "dist": "bash -c 'for v in /Volumes/clawpond*; do hdiutil detach \"$v\" -force 2>/dev/null; done; true' && tauri build --target universal-apple-darwin",
+    "dist:mac-arm": "bash -c 'for v in /Volumes/clawpond*; do hdiutil detach \"$v\" -force 2>/dev/null; done; true' && tauri build --target aarch64-apple-darwin",
+    "dist:mac-x64": "bash -c 'for v in /Volumes/clawpond*; do hdiutil detach \"$v\" -force 2>/dev/null; done; true' && tauri build --target x86_64-apple-darwin"
   },
   "dependencies": {
     "@clawpond/chattools-config": "workspace:*",
@@ -18,7 +21,10 @@
     "@tauri-apps/api": "^2",
     "next": "16.1.6",
     "react": "19.2.3",
-    "react-dom": "19.2.3"
+    "react-dom": "19.2.3",
+    "react-markdown": "^10.1.0",
+    "rehype-highlight": "^7.0.2",
+    "remark-gfm": "^4.0.1"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
