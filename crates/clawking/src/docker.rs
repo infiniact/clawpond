@@ -265,6 +265,8 @@ pub struct ComposeConfig {
     pub provider_env_key: String,
     /// Provider API key value
     pub provider_api_key: String,
+    /// Global shared directory on host, mounted into all gateways
+    pub shared_dir: String,
 }
 
 /// Write `.env` and `docker-compose.yml` to the given root directory.
@@ -292,6 +294,10 @@ pub fn write_compose_files(root_dir: &Path, cfg: &ComposeConfig) -> Result<(), S
     if !cfg.provider_env_key.is_empty() && !cfg.provider_api_key.is_empty() {
         env_content.push_str(&format!("{}={}\n", cfg.provider_env_key, cfg.provider_api_key));
     }
+    // Append shared directory if set
+    if !cfg.shared_dir.is_empty() {
+        env_content.push_str(&format!("OPENCLAW_SHARED_DIR={}\n", cfg.shared_dir));
+    }
     let env_path = root_dir.join(".env");
     let mut f = std::fs::File::create(&env_path)
         .map_err(|e| format!("Failed to create .env: {}", e))?;
@@ -308,6 +314,13 @@ pub fn write_compose_files(root_dir: &Path, cfg: &ComposeConfig) -> Result<(), S
         String::new()
     };
 
+    // Build the shared volume line for docker-compose
+    let shared_volume_line = if !cfg.shared_dir.is_empty() {
+        "\n      - ${OPENCLAW_SHARED_DIR}:/home/node/.openclaw/shared".to_string()
+    } else {
+        String::new()
+    };
+
     // Write docker-compose.yml
     let compose_content = format!(
         r#"services:
@@ -319,7 +332,7 @@ pub fn write_compose_files(root_dir: &Path, cfg: &ComposeConfig) -> Result<(), S
       OPENCLAW_GATEWAY_TOKEN: ${{OPENCLAW_GATEWAY_TOKEN}}{provider_env}
     volumes:
       - ${{OPENCLAW_CONFIG_DIR}}:/home/node/.openclaw
-      - ${{OPENCLAW_WORKSPACE_DIR}}:/home/node/.openclaw/workspace
+      - ${{OPENCLAW_WORKSPACE_DIR}}:/home/node/.openclaw/workspace{shared_vol}
     ports:
       - "127.0.0.1:${{OPENCLAW_GATEWAY_PORT:-18789}}:${{OPENCLAW_GATEWAY_PORT:-18789}}"
       - "127.0.0.1:${{OPENCLAW_BRIDGE_PORT:-18790}}:${{OPENCLAW_BRIDGE_PORT:-18790}}"
@@ -359,7 +372,7 @@ pub fn write_compose_files(root_dir: &Path, cfg: &ComposeConfig) -> Result<(), S
       BROWSER: echo
     volumes:
       - ${{OPENCLAW_CONFIG_DIR}}:/home/node/.openclaw
-      - ${{OPENCLAW_WORKSPACE_DIR}}:/home/node/.openclaw/workspace
+      - ${{OPENCLAW_WORKSPACE_DIR}}:/home/node/.openclaw/workspace{shared_vol}
     stdin_open: true
     tty: true
     init: true
@@ -368,6 +381,7 @@ pub fn write_compose_files(root_dir: &Path, cfg: &ComposeConfig) -> Result<(), S
       - openclaw-gateway
 "#,
         provider_env = provider_env_line,
+        shared_vol = shared_volume_line,
     );
 
     let compose_path = root_dir.join("docker-compose.yml");
@@ -381,6 +395,11 @@ pub fn write_compose_files(root_dir: &Path, cfg: &ComposeConfig) -> Result<(), S
         .map_err(|e| format!("Failed to create config dir: {}", e))?;
     std::fs::create_dir_all(Path::new(&cfg.workspace_dir))
         .map_err(|e| format!("Failed to create workspace dir: {}", e))?;
+    // Create shared directory if specified
+    if !cfg.shared_dir.is_empty() {
+        std::fs::create_dir_all(Path::new(&cfg.shared_dir))
+            .map_err(|e| format!("Failed to create shared dir: {}", e))?;
+    }
 
     info!("Wrote compose files to {}", root_dir.display());
     Ok(())
@@ -444,6 +463,94 @@ pub fn write_auth_profiles(
 
     info!("Wrote auth-profiles.json to {}", agent_dir.display());
     Ok(())
+}
+
+// ── Container stats ──
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContainerStats {
+    pub cpu_percent: f64,
+    pub mem_usage_mb: f64,
+}
+
+/// Get CPU and memory usage for the gateway container via `docker stats --no-stream`.
+pub fn compose_stats(root_dir: &Path) -> Option<ContainerStats> {
+    let (cmd, base_args) = compose_cmd()?;
+
+    // Get the container ID for the gateway service
+    let ps_output = Command::new(&cmd)
+        .args(&base_args)
+        .args(["-f", "docker-compose.yml", "ps", "-q", "openclaw-gateway"])
+        .current_dir(root_dir)
+        .output()
+        .ok()?;
+
+    if !ps_output.status.success() {
+        return None;
+    }
+
+    let container_id = String::from_utf8_lossy(&ps_output.stdout).trim().to_string();
+    if container_id.is_empty() {
+        return None;
+    }
+
+    // Get stats via docker stats --no-stream
+    let stats_output = Command::new("docker")
+        .args([
+            "stats", "--no-stream", "--format",
+            "{{.CPUPerc}}\t{{.MemUsage}}",
+            &container_id,
+        ])
+        .output()
+        .ok()?;
+
+    if !stats_output.status.success() {
+        return None;
+    }
+
+    let line = String::from_utf8_lossy(&stats_output.stdout).trim().to_string();
+    if line.is_empty() {
+        return None;
+    }
+
+    // Parse "2.34%\t128.5MiB / 7.77GiB"
+    let parts: Vec<&str> = line.split('\t').collect();
+    if parts.len() < 2 {
+        return None;
+    }
+
+    let cpu_percent = parts[0].trim_end_matches('%').parse::<f64>().ok()?;
+
+    // Parse memory: take the first value (current usage) before " / "
+    let mem_str = parts[1].split('/').next()?.trim();
+    let mem_usage_mb = parse_mem_to_mb(mem_str)?;
+
+    Some(ContainerStats {
+        cpu_percent,
+        mem_usage_mb,
+    })
+}
+
+/// Parse a memory string like "128.5MiB", "1.2GiB", "500KiB" to MB.
+fn parse_mem_to_mb(s: &str) -> Option<f64> {
+    let s = s.trim();
+    if let Some(val) = s.strip_suffix("GiB") {
+        val.trim().parse::<f64>().ok().map(|v| v * 1024.0)
+    } else if let Some(val) = s.strip_suffix("MiB") {
+        val.trim().parse::<f64>().ok()
+    } else if let Some(val) = s.strip_suffix("KiB") {
+        val.trim().parse::<f64>().ok().map(|v| v / 1024.0)
+    } else if let Some(val) = s.strip_suffix("GB") {
+        val.trim().parse::<f64>().ok().map(|v| v * 1000.0)
+    } else if let Some(val) = s.strip_suffix("MB") {
+        val.trim().parse::<f64>().ok()
+    } else if let Some(val) = s.strip_suffix("kB") {
+        val.trim().parse::<f64>().ok().map(|v| v / 1000.0)
+    } else if let Some(val) = s.strip_suffix("B") {
+        val.trim().parse::<f64>().ok().map(|v| v / 1_000_000.0)
+    } else {
+        None
+    }
 }
 
 // ── Service management ──

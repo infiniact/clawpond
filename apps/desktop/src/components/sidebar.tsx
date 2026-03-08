@@ -11,6 +11,8 @@ export type GatewayItem = {
   name: string;
   emoji: string;
   serviceState: ServiceState;
+  cpuPercent?: number;
+  memUsageMb?: number;
 };
 
 export function Sidebar({
@@ -40,12 +42,15 @@ export function Sidebar({
       <div className="flex flex-1 flex-col gap-0.5 overflow-y-auto px-1 pt-2">
         {gateways.map((item) => {
           const isActive = activeItem === item.id;
+          const isLoading = item.serviceState === "loading";
           const statusColor =
             item.serviceState === "running"
               ? "bg-accent-emerald"
               : item.serviceState === "error"
                 ? "bg-accent-red"
-                : "bg-text-ghost";
+                : item.serviceState === "loading"
+                  ? "bg-amber-400"
+                  : "bg-text-ghost";
 
           return (
             <button
@@ -73,14 +78,28 @@ export function Sidebar({
                   {item.emoji}
                 </span>
                 <span
-                  className={`absolute -right-1 -top-1 block h-[6px] w-[6px] rounded-full ring-1 ring-bg-deep ${statusColor}`}
+                  className={`absolute -right-1 -top-1 block h-[6px] w-[6px] rounded-full ring-1 ring-bg-deep ${statusColor}${isLoading ? " animate-pulse" : ""}`}
                 />
               </div>
 
               {expanded ? (
-                <span className="min-w-0 truncate text-[12px] font-medium leading-tight">
-                  {item.name}
-                </span>
+                <div className="min-w-0 flex-1">
+                  <span className="block truncate text-[12px] font-medium leading-tight">
+                    {item.name}
+                  </span>
+                  {item.serviceState === "loading" && (
+                    <span className="block truncate text-[9px] leading-tight text-amber-400 animate-pulse">
+                      loading...
+                    </span>
+                  )}
+                  {item.serviceState === "running" && item.cpuPercent != null && item.memUsageMb != null && (
+                    <span className="block truncate text-[9px] leading-tight text-text-ghost">
+                      CPU {item.cpuPercent.toFixed(1)}% · {item.memUsageMb < 1024
+                        ? `${item.memUsageMb.toFixed(0)}MB`
+                        : `${(item.memUsageMb / 1024).toFixed(1)}GB`}
+                    </span>
+                  )}
+                </div>
               ) : (
                 <span className="max-w-full truncate text-[9px] font-medium leading-none tracking-wide">
                   {item.name.length > 6 ? item.name.slice(0, 5) + "\u2026" : item.name}

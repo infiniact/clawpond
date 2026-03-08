@@ -7,22 +7,22 @@ import { TaskPanel } from "../components/task-panel";
 import { TopBar } from "../components/top-bar";
 import { IconPlay, IconStop, IconSettings, IconX, IconGlobe, IconPlus, IconSearch, IconCpu, IconHash, IconFolder, IconDownload, IconCheck, IconSpinner, IconXCircle, IconArrowRight, IconShield } from "../components/icons";
 import { QuickModelConfig, QuickChannelsConfig } from "../components/quick-config";
+import { RpcPoolProvider } from "../lib/rpc-pool-context";
+import type { GatewayInfo } from "../lib/rpc-pool";
 import { openUrlInWindow } from "../lib/open-url";
 
-export type ServiceState = "unconfigured" | "running" | "error" | "stopped";
-export type GatewayType = "docker" | "local" | "existing" | "remote";
+export type ServiceState = "unconfigured" | "loading" | "running" | "error" | "stopped";
 
-type Gateway = {
+export type Gateway = {
   id: string;
   name: string;
   emoji: string;
-  type: GatewayType;
+  type: "docker";
   rootDir: string | null;
   configured: boolean;
   serviceState: ServiceState;
-  remoteHost?: string;
-  remotePort?: string;
-  remoteToken?: string;
+  cpuPercent?: number;
+  memUsageMb?: number;
 };
 
 /** Persisted gateway shape (no runtime state like serviceState) */
@@ -30,15 +30,13 @@ type StoredGateway = {
   id: string;
   name: string;
   emoji: string;
-  type: GatewayType;
+  type: "docker";
   rootDir: string | null;
   configured: boolean;
-  remoteHost?: string;
-  remotePort?: string;
-  remoteToken?: string;
 };
 
 const GATEWAYS_STORAGE_KEY = "clawpond-gateways";
+const SHARED_DIR_STORAGE_KEY = "clawpond-shared-dir";
 
 function loadGateways(): Gateway[] {
   try {
@@ -48,10 +46,10 @@ function loadGateways(): Gateway[] {
       if (Array.isArray(stored) && stored.length > 0) {
         return stored.map((g) => ({
           ...g,
-          type: g.type || "docker" as const,
-          serviceState: g.type === "remote"
-            ? "running" as const
-            : g.configured ? "stopped" as const : "unconfigured" as const,
+          type: "docker" as const,
+          serviceState: !g.configured
+            ? "unconfigured" as const
+            : "loading" as const,
         }));
       }
     }
@@ -62,11 +60,8 @@ function loadGateways(): Gateway[] {
 }
 
 function saveGateways(gateways: Gateway[]) {
-  const stored: StoredGateway[] = gateways.map(({ id, name, emoji, type, rootDir, configured, remoteHost, remotePort, remoteToken }) => ({
-    id, name, emoji, type, rootDir, configured,
-    ...(remoteHost ? { remoteHost } : {}),
-    ...(remotePort ? { remotePort } : {}),
-    ...(remoteToken ? { remoteToken } : {}),
+  const stored: StoredGateway[] = gateways.map(({ id, name, emoji, rootDir, configured }) => ({
+    id, name, emoji, type: "docker", rootDir, configured,
   }));
   localStorage.setItem(GATEWAYS_STORAGE_KEY, JSON.stringify(stored));
 }
@@ -136,6 +131,11 @@ export default function Home() {
   const [reconfiguring, setReconfiguring] = useState(false);
   const [quickConfig, setQuickConfig] = useState<"model" | "channels" | null>(null);
   const [deleteConfirm, setDeleteConfirm] = useState<{ gatewayId: string; name: string; rootDir: string | null; type: GatewayType } | null>(null);
+  const [settingsModal, setSettingsModal] = useState(false);
+  const [sharedDir, setSharedDir] = useState(() => {
+    try { return localStorage.getItem(SHARED_DIR_STORAGE_KEY) || ""; } catch { return ""; }
+  });
+  const [settingsDraft, setSettingsDraft] = useState("");
 
   // Persist gateways whenever the list changes
   useEffect(() => {
@@ -167,9 +167,7 @@ export default function Home() {
     setCtxMenu({ x: e.clientX, y: e.clientY, gatewayId });
     // Resolve the endpoint address for display
     const gw = gateways.find((g) => g.id === gatewayId);
-    if (gw?.type === "remote" && gw.remoteHost && gw.remotePort) {
-      setCtxEndpoint(`${gw.remoteHost}:${gw.remotePort}`);
-    } else if (gw?.rootDir) {
+    if (gw?.rootDir) {
       setCtxEndpoint(null);
       import("@tauri-apps/api/core").then(({ invoke }) =>
         invoke<{ port: string; token: string }>("read_gateway_info", { rootDir: gw.rootDir })
@@ -219,7 +217,7 @@ export default function Home() {
       return;
     }
     if (action === "delete") {
-      setDeleteConfirm({ gatewayId: targetId, name: targetGw.name, rootDir: targetGw.rootDir, type: targetGw.type });
+      setDeleteConfirm({ gatewayId: targetId, name: targetGw.name, rootDir: targetGw.rootDir });
       return;
     }
     if (action === "config-model") {
@@ -231,11 +229,6 @@ export default function Home() {
       return;
     }
     if (action === "open-gateway") {
-      if (targetGw.type === "remote" && targetGw.remoteHost && targetGw.remotePort && targetGw.remoteToken) {
-        const url = `http://${targetGw.remoteHost}:${targetGw.remotePort}/?token=${encodeURIComponent(targetGw.remoteToken)}`;
-        openUrlInWindow(url, "Gateway");
-        return;
-      }
       if (!rootDir) return;
       try {
         const { invoke } = await import("@tauri-apps/api/core");
@@ -253,7 +246,7 @@ export default function Home() {
         updateGateway(targetId, { serviceState: "running" });
       } else if (action === "stop") {
         await invoke("compose_stop", { rootDir });
-        updateGateway(targetId, { serviceState: "stopped" });
+        updateGateway(targetId, { serviceState: "stopped", cpuPercent: undefined, memUsageMb: undefined });
       }
     } catch {
       updateGateway(targetId, { serviceState: "error" });
@@ -261,38 +254,92 @@ export default function Home() {
     checkHealth();
   }
 
-  // Auto-detect existing config on startup
+  // On startup: check health for ALL configured gateways
   useEffect(() => {
     (async () => {
+      const { invoke } = await import("@tauri-apps/api/core");
+
+      // Auto-detect default gateway config
       try {
-        const { invoke } = await import("@tauri-apps/api/core");
         const detected = await invoke<string | null>("detect_config");
         if (detected) {
-          const status = await invoke<{
-            running: boolean;
-            healthy: boolean | null;
-            error: string | null;
-          }>("compose_health", { rootDir: detected });
           setGateways((prev) =>
             prev.map((g) =>
-              g.id === "default"
-                ? {
-                    ...g,
-                    rootDir: detected,
-                    configured: true,
-                    serviceState: status.running
-                      ? status.healthy === false ? "error" : "running"
-                      : "stopped",
-                  }
+              g.id === "default" && !g.configured
+                ? { ...g, rootDir: detected, configured: true, serviceState: "loading" }
                 : g
             )
           );
         }
-      } catch {
-        // No existing config
-      }
+      } catch { /* no existing config */ }
+
+      // Now check health for every configured gateway
+      setGateways((prev) => {
+        for (const gw of prev) {
+          if (!gw.configured || !gw.rootDir) continue;
+          checkGatewayHealth(invoke, gw.id, gw.rootDir);
+        }
+        return prev;
+      });
     })();
-  }, []);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Check health for a single docker/local gateway
+  async function checkGatewayHealth(
+    invoke: <T>(cmd: string, args?: Record<string, unknown>) => Promise<T>,
+    gwId: string,
+    rootDir: string,
+    gwType: GatewayType
+  ) {
+    try {
+      const status = await invoke<{
+        running: boolean;
+        healthy: boolean | null;
+        error: string | null;
+      }>("compose_health", { rootDir });
+      const isRunning = status.running;
+      const serviceState: ServiceState = isRunning
+        ? status.healthy === false ? "error" : "running"
+        : "stopped";
+
+      updateGateway(gwId, isRunning
+        ? { serviceState }
+        : { serviceState, cpuPercent: undefined, memUsageMb: undefined });
+
+      // Fetch stats in background
+      if (isRunning && gwType === "docker") {
+        invoke<{ cpu_percent: number; mem_usage_mb: number } | null>(
+          "compose_stats", { rootDir }
+        ).then((stats) => {
+          if (stats) {
+            updateGateway(gwId, {
+              cpuPercent: stats.cpu_percent,
+              memUsageMb: stats.mem_usage_mb,
+            });
+          }
+        }).catch(() => {});
+      }
+    } catch {
+      updateGateway(gwId, { serviceState: "error", cpuPercent: undefined, memUsageMb: undefined });
+    }
+  }
+
+  // Probe a remote gateway by attempting a WebSocket connection
+  async function probeRemoteGateway(gw: Gateway) {
+    if (!gw.remoteHost || !gw.remotePort || !gw.remoteToken) {
+      updateGateway(gw.id, { serviceState: "error" });
+      return;
+    }
+    try {
+      const { OpenClawRpc } = await import("../lib/openclaw-rpc");
+      const probe = new OpenClawRpc();
+      await probe.connect(gw.remotePort, gw.remoteToken, gw.remoteHost);
+      probe.disconnect();
+      updateGateway(gw.id, { serviceState: "running" });
+    } catch {
+      updateGateway(gw.id, { serviceState: "error" });
+    }
+  }
 
   // Poll service health for active gateway
   const checkHealth = useCallback(async () => {
@@ -300,20 +347,11 @@ export default function Home() {
     if (!rootDir) return;
     try {
       const { invoke } = await import("@tauri-apps/api/core");
-      const status = await invoke<{
-        running: boolean;
-        healthy: boolean | null;
-        error: string | null;
-      }>("compose_health", { rootDir });
-      updateGateway(activeGatewayId, {
-        serviceState: status.running
-          ? status.healthy === false ? "error" : "running"
-          : "stopped",
-      });
+      await checkGatewayHealth(invoke, activeGatewayId, rootDir, activeGateway.type);
     } catch {
-      updateGateway(activeGatewayId, { serviceState: "error" });
+      updateGateway(activeGatewayId, { serviceState: "error", cpuPercent: undefined, memUsageMb: undefined });
     }
-  }, [activeGateway.rootDir, activeGatewayId, updateGateway]);
+  }, [activeGateway.rootDir, activeGateway.type, activeGatewayId, updateGateway]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (!activeGateway.configured || !activeGateway.rootDir || activeGateway.type === "remote") return;
@@ -400,11 +438,26 @@ export default function Home() {
     name: g.name,
     emoji: g.emoji,
     serviceState: g.serviceState,
+    cpuPercent: g.cpuPercent,
+    memUsageMb: g.memUsageMb,
+  }));
+
+  // Map gateways to GatewayInfo for the RPC pool context
+  const gatewayInfos: GatewayInfo[] = gateways.map((g) => ({
+    id: g.id,
+    name: g.name,
+    emoji: g.emoji,
+    serviceState: g.serviceState,
+    rootDir: g.rootDir,
+    remoteHost: g.remoteHost,
+    remotePort: g.remotePort,
+    remoteToken: g.remoteToken,
   }));
 
   return (
+    <RpcPoolProvider gateways={gatewayInfos}>
     <div className="flex h-screen flex-col overflow-hidden bg-bg-deep font-sans">
-      <TopBar />
+      <TopBar onSettings={() => { setSettingsDraft(sharedDir); setSettingsModal(true); }} />
       <div className="flex min-h-0 flex-1">
         <Sidebar
           expanded={sidebarExpanded}
@@ -426,6 +479,7 @@ export default function Home() {
               taskPanelOpen={taskPanelOpen}
               gatewayName={g.name}
               gatewayEmoji={g.emoji}
+              gatewayId={g.id}
               configured={g.configured}
               reconfiguring={isActive && reconfiguring}
               onCloseReconfig={() => setReconfiguring(false)}
@@ -440,6 +494,7 @@ export default function Home() {
               remoteHost={g.remoteHost}
               remotePort={g.remotePort}
               remoteToken={g.remoteToken}
+              sharedDir={sharedDir}
             />
           );
         })}
@@ -577,7 +632,55 @@ export default function Home() {
           onCancel={() => setDeleteConfirm(null)}
         />
       )}
+
+      {/* ── Settings Modal ── */}
+      {settingsModal && (
+        <div className="fixed inset-0 z-[1000] flex items-center justify-center bg-black/60 backdrop-blur-sm">
+          <div className="w-full max-w-md rounded-xl bg-bg-surface p-6 shadow-2xl ring-1 ring-border-default">
+            <div className="mb-4 flex items-center justify-between">
+              <h2 className="text-[14px] font-semibold text-text-primary">Global Settings</h2>
+              <button onClick={() => setSettingsModal(false)} className="text-text-ghost hover:text-text-secondary">
+                <IconX size={16} />
+              </button>
+            </div>
+
+            <label className="mb-1.5 block text-[12px] font-medium text-text-secondary">
+              Shared Directory
+            </label>
+            <p className="mb-2 text-[11px] text-text-ghost">
+              A host directory mounted into all Docker gateways at <code className="rounded bg-bg-elevated px-1 py-0.5 font-mono text-[10px]">/home/node/.openclaw/shared</code>. Leave empty to disable.
+            </p>
+            <input
+              type="text"
+              value={settingsDraft}
+              onChange={(e) => setSettingsDraft(e.target.value)}
+              placeholder="~/clawpond/shared"
+              className="mb-4 w-full rounded-lg border border-border-default bg-bg-deep px-3 py-2 text-[12px] text-text-primary placeholder:text-text-ghost focus:border-accent-blue focus:outline-none"
+            />
+
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => setSettingsModal(false)}
+                className="rounded-lg border border-border-default px-3 py-1.5 text-[12px] text-text-secondary hover:bg-bg-hover"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => {
+                  setSharedDir(settingsDraft);
+                  localStorage.setItem(SHARED_DIR_STORAGE_KEY, settingsDraft);
+                  setSettingsModal(false);
+                }}
+                className="rounded-lg bg-accent-blue px-3 py-1.5 text-[12px] font-medium text-white hover:bg-accent-blue/90"
+              >
+                Save
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
+    </RpcPoolProvider>
   );
 }
 

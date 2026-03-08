@@ -20,10 +20,14 @@ import {
   IconChevronDown,
   IconImage,
   IconMic,
+  IconFile,
 } from "./icons";
+import { MentionPopup } from "./mention-popup";
 import { ConfigWizard } from "./config-wizard";
 import { OpenClawRpc } from "../lib/openclaw-rpc";
 import type { RpcEvent } from "../lib/openclaw-rpc";
+import { useRpcPool } from "../lib/rpc-pool-context";
+import { parseMentions, extractMentionContent, segmentMentions } from "../lib/mention-utils";
 import {
   loadMessages,
   saveAllMessages,
@@ -38,6 +42,10 @@ type Message = {
   streaming?: boolean;
   /** Tool call info displayed inline */
   tool?: { name: string; status: "running" | "done" | "error" };
+  /** When message comes from another Gateway via @ mention */
+  sourceGateway?: { id: string; name: string; emoji: string };
+  /** Gateway IDs mentioned in this message */
+  mentions?: string[];
 };
 
 /** Extract plain text from content that may be a string, a content block {type,text}, or an array of blocks. */
@@ -67,6 +75,7 @@ export function ChatArea({
   taskPanelOpen,
   gatewayName,
   gatewayEmoji,
+  gatewayId,
   configured,
   reconfiguring,
   onCloseReconfig,
@@ -78,12 +87,14 @@ export function ChatArea({
   remoteHost,
   remotePort,
   remoteToken,
+  sharedDir,
 }: {
   hidden?: boolean;
   onToggleTaskPanel: () => void;
   taskPanelOpen: boolean;
   gatewayName: string;
   gatewayEmoji: string;
+  gatewayId: string;
   configured: boolean;
   reconfiguring?: boolean;
   onCloseReconfig?: () => void;
@@ -95,6 +106,7 @@ export function ChatArea({
   remoteHost?: string;
   remotePort?: string;
   remoteToken?: string;
+  sharedDir?: string;
 }) {
   const isRemote = !!remoteHost;
   const showWizard = !isRemote && (!configured || reconfiguring);
@@ -129,11 +141,12 @@ export function ChatArea({
           onClose={reconfiguring ? onCloseReconfig : undefined}
           skipDocker={skipDocker}
           fixedRootDir={fixedRootDir}
+          sharedDir={sharedDir}
         />
       </div>
       {configured && (
         <div className={`flex min-h-0 flex-1 flex-col ${showChat ? "" : "hidden"}`}>
-          <ChatView rootDir={rootDir} serviceState={serviceState} remoteHost={remoteHost} remotePort={remotePort} remoteToken={remoteToken} hidden={hidden} />
+          <ChatView rootDir={rootDir} serviceState={serviceState} remoteHost={remoteHost} remotePort={remotePort} remoteToken={remoteToken} hidden={hidden} gatewayId={gatewayId} gatewayName={gatewayName} />
         </div>
       )}
     </div>
@@ -147,6 +160,8 @@ function toStored(msg: Message): StoredMessage {
     content: msg.content,
     timestamp: msg.timestamp.toISOString(),
     tool: msg.tool,
+    ...(msg.sourceGateway ? { sourceGateway: msg.sourceGateway } : {}),
+    ...(msg.mentions ? { mentions: msg.mentions } : {}),
   };
 }
 
@@ -157,10 +172,12 @@ function fromStored(msg: StoredMessage): Message {
     content: msg.content,
     timestamp: new Date(msg.timestamp),
     tool: msg.tool,
+    ...(msg.sourceGateway ? { sourceGateway: msg.sourceGateway } : {}),
+    ...(msg.mentions ? { mentions: msg.mentions } : {}),
   };
 }
 
-function ChatView({ rootDir, serviceState, remoteHost, remotePort, remoteToken, hidden }: { rootDir: string | null; serviceState: string; remoteHost?: string; remotePort?: string; remoteToken?: string; hidden?: boolean }) {
+function ChatView({ rootDir, serviceState, remoteHost, remotePort, remoteToken, hidden, gatewayId, gatewayName }: { rootDir: string | null; serviceState: string; remoteHost?: string; remotePort?: string; remoteToken?: string; hidden?: boolean; gatewayId: string; gatewayName: string }) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [connected, setConnected] = useState(false);
@@ -179,11 +196,24 @@ function ChatView({ rootDir, serviceState, remoteHost, remotePort, remoteToken, 
   const [loadedOffset, setLoadedOffset] = useState(0);
   const [loadingMore, setLoadingMore] = useState(false);
   const [imageAttachments, setImageAttachments] = useState<{ name: string; mediaType: string; base64: string }[]>([]);
+  const [fileAttachments, setFileAttachments] = useState<{ name: string; containerPath: string }[]>([]);
   const [voiceListening, setVoiceListening] = useState(false);
   const imageInputRef = useRef<HTMLInputElement>(null);
   const recognitionRef = useRef<SpeechRecognition | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+
+  // @ mention state
+  const [mentionPopupOpen, setMentionPopupOpen] = useState(false);
+  const [mentionQuery, setMentionQuery] = useState("");
+  const [mentionAnchor, setMentionAnchor] = useState<{ left: number; bottom: number } | null>(null);
+  const mentionStartPos = useRef<number>(-1);
+  const { pool, gateways: allGateways } = useRpcPool();
+  // Refs for values needed in the event handler (which has [] deps)
+  const allGatewaysRef = useRef(allGateways);
+  allGatewaysRef.current = allGateways;
+  const forwardRef = useRef(forwardToGateway);
+  // will be assigned after forwardToGateway is defined
   const streamBuf = useRef<string>("");
   const streamMsgId = useRef<string | null>(null);
   const streamSource = useRef<"agent" | "chat" | null>(null);
@@ -621,6 +651,22 @@ function ChatView({ rootDir, serviceState, remoteHost, remotePort, remoteToken, 
         streamMsgId.current = null;
         streamSource.current = null;
         setSending(false);
+
+        // Auto-@ detection: check if the AI reply mentions other gateways
+        if (content && msg?.role === "assistant") {
+          const gws = allGatewaysRef.current;
+          const autoMentions = parseMentions(content, gws);
+          const autoContent = extractMentionContent(content, gws);
+          if (autoMentions.length > 0 && autoContent) {
+            for (const autoId of autoMentions) {
+              if (autoId === gatewayId) continue;
+              const autoGw = gws.find((g) => g.id === autoId);
+              if (autoGw && autoGw.serviceState === "running") {
+                forwardRef.current(autoGw, autoContent, 0);
+              }
+            }
+          }
+        }
       }
 
       // ── Chat delta (block streaming) ──
@@ -766,26 +812,196 @@ function ChatView({ rootDir, serviceState, remoteHost, remotePort, remoteToken, 
     }
   }
 
+  // Forward a message to another gateway via the RPC pool
+  async function forwardToGateway(
+    targetGw: { id: string; name: string; emoji: string; serviceState: string; rootDir: string | null; remoteHost?: string; remotePort?: string; remoteToken?: string },
+    content: string,
+    depth: number
+  ) {
+    if (depth > 0) return; // prevent circular forwarding
+
+    try {
+      const remoteRpc = await pool.getConnection(targetGw);
+
+      // Create a placeholder streaming message from the target gateway
+      const msgId = `fwd-${targetGw.id}-${Date.now()}`;
+      let fwdBuf = "";
+
+      setMessages((prev) => [...prev, {
+        id: msgId,
+        role: "assistant",
+        content: "",
+        timestamp: new Date(),
+        streaming: true,
+        sourceGateway: { id: targetGw.id, name: targetGw.name, emoji: targetGw.emoji },
+      }]);
+
+      // Listen for streaming events from the target gateway
+      const unsub = remoteRpc.onEvent((event: RpcEvent) => {
+        // Agent stream
+        if (event.type === "agent" && event.payload?.stream === "assistant") {
+          const delta = event.payload?.data?.delta || "";
+          if (typeof delta === "string" && delta) {
+            fwdBuf += delta;
+            setMessages((prev) => prev.map((m) =>
+              m.id === msgId ? { ...m, content: fwdBuf } : m
+            ));
+          }
+        }
+        // Chat delta
+        if (event.type === "chat" && event.payload?.state === "delta") {
+          const delta = textOf(event.payload?.message?.text || event.payload?.message?.content || "");
+          if (delta) {
+            fwdBuf += delta;
+            setMessages((prev) => prev.map((m) =>
+              m.id === msgId ? { ...m, content: fwdBuf } : m
+            ));
+          }
+        }
+        // Chat final
+        if (event.type === "chat" && event.payload?.state === "final") {
+          const msg = event.payload?.message;
+          const finalContent = textOf(msg?.text || msg?.content || "");
+          setMessages((prev) => prev.map((m) =>
+            m.id === msgId ? { ...m, content: finalContent || fwdBuf || m.content, streaming: false } : m
+          ));
+          unsub();
+
+          // Check for auto-@ mentions in the AI reply (depth=1 forward only)
+          if (finalContent) {
+            const autoMentions = parseMentions(finalContent, allGateways);
+            const autoContent = extractMentionContent(finalContent, allGateways);
+            if (autoMentions.length > 0 && autoContent) {
+              for (const autoId of autoMentions) {
+                if (autoId === gatewayId || autoId === targetGw.id) continue;
+                const autoGw = allGateways.find((g) => g.id === autoId);
+                if (autoGw && autoGw.serviceState === "running") {
+                  forwardToGateway(autoGw, autoContent, depth + 1);
+                }
+              }
+            }
+          }
+        }
+        // Chat error
+        if (event.type === "chat" && event.payload?.state === "error") {
+          setMessages((prev) => prev.map((m) =>
+            m.id === msgId ? { ...m, content: `Error from ${targetGw.name}: ${textOf(event.payload?.error || "unknown error")}`, streaming: false } : m
+          ));
+          unsub();
+        }
+        // Agent lifecycle end
+        if (event.type === "agent" && event.payload?.stream === "lifecycle") {
+          if (event.payload?.data?.phase === "end" || event.payload?.data?.phase === "error") {
+            setMessages((prev) => prev.map((m) =>
+              m.id === msgId ? { ...m, streaming: false } : m
+            ));
+            // Don't unsub — wait for chat.final
+            setTimeout(() => unsub(), 5000);
+          }
+        }
+      });
+
+      // Send the message
+      const fwdSessionKey = `fwd-${gatewayId}-${Date.now().toString(36)}`;
+      const fwdResult = await remoteRpc.call("chat.send", {
+        sessionKey: fwdSessionKey,
+        idempotencyKey: `fwd-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        message: content,
+      });
+
+      // Handle direct response (non-streaming gateways)
+      if (fwdResult && typeof fwdResult === "object") {
+        const r = fwdResult as Record<string, unknown>;
+        const rawContent = r.text || (r.message as Record<string, unknown>)?.content || (r.message as Record<string, unknown>)?.text || "";
+        const replyText = textOf(rawContent);
+        if (replyText) {
+          setMessages((prev) => prev.map((m) =>
+            m.id === msgId ? { ...m, content: replyText, streaming: false } : m
+          ));
+          unsub();
+        }
+      }
+    } catch (e) {
+      const errMsg = typeof e === "string" ? e : (e as { message?: string })?.message || "Forward failed";
+      setMessages((prev) => [...prev, {
+        id: `fwd-err-${targetGw.id}-${Date.now()}`,
+        role: "system",
+        content: `Failed to forward to ${targetGw.emoji} ${targetGw.name}: ${errMsg}`,
+        timestamp: new Date(),
+      }]);
+    }
+  }
+  forwardRef.current = forwardToGateway;
+
   async function handleSend() {
     const text = input.trim();
     const images = [...imageAttachments];
-    if (!text && images.length === 0) return;
+    const files = [...fileAttachments];
+    if (!text && images.length === 0 && files.length === 0) return;
     if (sending) return;
 
+    // Append file paths to the message text so the agent knows where to find them
+    const fileSuffix = files.length > 0
+      ? "\n\n" + files.map((f) => `[File: ${f.containerPath}]`).join("\n")
+      : "";
+    const fullText = (text + fileSuffix).trim();
+
     // Build content for local UI display
-    const displayContent = images.length > 0
-      ? (text ? `[${images.length} image(s)] ${text}` : `[${images.length} image(s)]`)
+    const filePart = files.length > 0 ? `[${files.length} file(s)]` : "";
+    const imgPart = images.length > 0 ? `[${images.length} image(s)]` : "";
+    const attachParts = [imgPart, filePart].filter(Boolean).join(" ");
+    const displayContent = attachParts
+      ? (text ? `${attachParts} ${text}` : attachParts)
       : text;
+
+    // Detect @ mentions — if present, only forward to mentioned gateways, do NOT send to self
+    const mentionedIds = parseMentions(fullText, allGateways).filter((id) => id !== gatewayId);
+    const isMentionOnly = mentionedIds.length > 0;
 
     const userMsg: Message = {
       id: `u-${Date.now()}`,
       role: "user",
       content: displayContent,
       timestamp: new Date(),
+      mentions: mentionedIds.length > 0 ? mentionedIds : undefined,
     };
     setMessages((prev) => [...prev, userMsg]);
     setInput("");
     setImageAttachments([]);
+    setFileAttachments([]);
+
+    if (isMentionOnly) {
+      // @ mention mode: only forward to mentioned gateways, skip current gateway
+      const forwardContent = extractMentionContent(fullText, allGateways);
+      if (!forwardContent) {
+        // Nothing left after stripping mentions
+        setMessages((prev) => [...prev, {
+          id: `sys-${Date.now()}`,
+          role: "system",
+          content: "No message content after removing @mentions",
+          timestamp: new Date(),
+        }]);
+        return;
+      }
+
+      for (const targetId of mentionedIds) {
+        const targetGw = allGateways.find((g) => g.id === targetId);
+        if (!targetGw) continue;
+        if (targetGw.serviceState !== "running") {
+          setMessages((prev) => [...prev, {
+            id: `sys-${Date.now()}-${targetId}`,
+            role: "system",
+            content: `${targetGw.emoji} ${targetGw.name} is not running — message not forwarded`,
+            timestamp: new Date(),
+          }]);
+          continue;
+        }
+        forwardToGateway(targetGw, forwardContent, 0);
+      }
+      return;
+    }
+
+    // Normal send to current gateway (no @ mentions)
     setSending(true);
     streamBuf.current = "";
     streamMsgId.current = null;
@@ -814,7 +1030,7 @@ function ChatView({ rootDir, serviceState, remoteHost, remotePort, remoteToken, 
               data: img.base64,
             },
           }));
-          contentBlocks.push({ type: "text", text: text || "Please describe this image." });
+          contentBlocks.push({ type: "text", text: fullText || "Please describe this image." });
 
           result = await rpc.call("chat.send", {
             ...baseParams,
@@ -824,7 +1040,7 @@ function ChatView({ rootDir, serviceState, remoteHost, remotePort, remoteToken, 
           // Gateway does NOT support images — send text only + show warning
           result = await rpc.call("chat.send", {
             ...baseParams,
-            message: text || "Please describe this image.",
+            message: fullText || "Please describe this image.",
           });
           setMessages((prev) => [...prev, {
             id: `warn-${Date.now()}`,
@@ -836,7 +1052,7 @@ function ChatView({ rootDir, serviceState, remoteHost, remotePort, remoteToken, 
       } else {
         result = await rpc.call("chat.send", {
           ...baseParams,
-          message: text,
+          message: fullText,
         });
       }
 
@@ -929,6 +1145,31 @@ function ChatView({ rootDir, serviceState, remoteHost, remotePort, remoteToken, 
 
   function removeImage(index: number) {
     setImageAttachments((prev) => prev.filter((_, i) => i !== index));
+  }
+
+  function removeFile(index: number) {
+    setFileAttachments((prev) => prev.filter((_, i) => i !== index));
+  }
+
+  // File attachment: pick files via native dialog, copy to workspace/tmp/
+  async function handleFilePick() {
+    if (!rootDir) return;
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const paths = await invoke<string[]>("pick_files");
+      if (!paths || paths.length === 0) return;
+      for (const sourcePath of paths) {
+        try {
+          const containerPath = await invoke<string>("copy_to_workspace", { rootDir, sourcePath });
+          const name = sourcePath.split("/").pop() || sourcePath;
+          setFileAttachments((prev) => [...prev, { name, containerPath }]);
+        } catch (err) {
+          console.warn("[file] Failed to copy file:", err);
+        }
+      }
+    } catch (err) {
+      console.warn("[file] Failed to pick files:", err);
+    }
   }
 
   // Voice input — Web Speech API with macOS fallback
@@ -1048,6 +1289,11 @@ function ChatView({ rootDir, serviceState, remoteHost, remotePort, remoteToken, 
               >
                 Retry
               </button>
+            </>
+          ) : serviceState === "loading" ? (
+            <>
+              <IconSpinner size={24} className="animate-spin text-amber-400" />
+              <p className="text-[13px] text-text-tertiary">Loading Gateway...</p>
             </>
           ) : serviceState !== "running" ? (
             <>
@@ -1269,20 +1515,90 @@ function ChatView({ rootDir, serviceState, remoteHost, remotePort, remoteToken, 
             </div>
           )}
 
+          {/* File preview strip */}
+          {fileAttachments.length > 0 && (
+            <div className="flex flex-wrap gap-2">
+              {fileAttachments.map((file, i) => (
+                <div key={i} className="group relative flex items-center gap-1.5 rounded-lg bg-bg-surface px-2.5 py-1.5 ring-1 ring-border-default">
+                  <IconFile size={12} className="shrink-0 text-text-ghost" />
+                  <span className="max-w-[160px] truncate text-[11px] text-text-secondary">{file.name}</span>
+                  <button
+                    onClick={() => removeFile(i)}
+                    className="flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-full text-text-ghost opacity-0 transition-opacity hover:text-text-tertiary group-hover:opacity-100"
+                  >
+                    <IconX size={8} />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+
           <div className="flex rounded-xl bg-bg-surface ring-1 ring-border-default transition-all focus-within:ring-border-strong">
             <textarea
               ref={inputRef}
               value={input}
-              onChange={(e) => setInput(e.target.value)}
+              onChange={(e) => {
+                const val = e.target.value;
+                setInput(val);
+
+                // Detect @ mention trigger
+                const cursorPos = e.target.selectionStart || 0;
+                const textBeforeCursor = val.slice(0, cursorPos);
+                const atMatch = textBeforeCursor.match(/@(\S*)$/);
+                if (atMatch) {
+                  mentionStartPos.current = cursorPos - atMatch[0].length;
+                  setMentionQuery(atMatch[1]);
+                  setMentionPopupOpen(true);
+                  // Calculate anchor position from textarea
+                  const rect = e.target.getBoundingClientRect();
+                  setMentionAnchor({ left: rect.left + 16, bottom: rect.top });
+                } else {
+                  setMentionPopupOpen(false);
+                  mentionStartPos.current = -1;
+                }
+              }}
               onKeyDown={handleKeyDown}
               onCompositionStart={handleCompositionStart}
               onCompositionEnd={handleCompositionEnd}
-              placeholder="Message ClawKing... (⌘+Enter to send)"
+              placeholder="Message... (@ to mention, ⌘+Enter to send)"
               rows={4}
               disabled={sending}
               className="flex-1 resize-none bg-transparent px-3.5 py-3 text-[13px] leading-relaxed text-text-primary placeholder:text-text-ghost focus:outline-none disabled:opacity-50"
             />
           </div>
+
+          {/* @ Mention Popup */}
+          {mentionPopupOpen && (
+            <MentionPopup
+              query={mentionQuery}
+              gateways={allGateways}
+              currentGatewayId={gatewayId}
+              anchorRect={mentionAnchor}
+              onClose={() => {
+                setMentionPopupOpen(false);
+                mentionStartPos.current = -1;
+              }}
+              onSelect={(gw) => {
+                // Replace @query with @GatewayName
+                const start = mentionStartPos.current;
+                if (start >= 0) {
+                  const before = input.slice(0, start);
+                  const cursorPos = inputRef.current?.selectionStart || input.length;
+                  const after = input.slice(cursorPos);
+                  const newText = `${before}@${gw.name} ${after}`;
+                  setInput(newText);
+                  // Focus and set cursor after the inserted mention
+                  setTimeout(() => {
+                    const pos = before.length + gw.name.length + 2; // @Name + space
+                    inputRef.current?.setSelectionRange(pos, pos);
+                    inputRef.current?.focus();
+                  }, 0);
+                }
+                setMentionPopupOpen(false);
+                mentionStartPos.current = -1;
+              }}
+            />
+          )}
 
           {/* Toolbar: left actions + right send */}
           <div className="flex items-center justify-between">
@@ -1303,6 +1619,14 @@ function ChatView({ rootDir, serviceState, remoteHost, remotePort, remoteToken, 
                 title="Insert image"
               >
                 <IconImage size={16} />
+              </button>
+              <button
+                onClick={handleFilePick}
+                disabled={sending || !rootDir}
+                className="flex h-8 w-8 items-center justify-center rounded-lg text-text-tertiary transition-colors hover:bg-bg-hover hover:text-text-secondary disabled:opacity-30"
+                title="Attach file"
+              >
+                <IconFile size={16} />
               </button>
               <button
                 onClick={handleVoiceInput}
@@ -1330,7 +1654,7 @@ function ChatView({ rootDir, serviceState, remoteHost, remotePort, remoteToken, 
             ) : (
               <button
                 onClick={handleSend}
-                disabled={!input.trim() && imageAttachments.length === 0}
+                disabled={!input.trim() && imageAttachments.length === 0 && fileAttachments.length === 0}
                 className="flex h-9 items-center gap-1.5 rounded-xl bg-accent-emerald/15 px-4 text-[12px] font-medium text-accent-emerald ring-1 ring-accent-emerald/25 transition-all hover:bg-accent-emerald/25 disabled:opacity-30 disabled:hover:bg-accent-emerald/15"
               >
                 <IconSend size={14} />
@@ -1421,7 +1745,11 @@ function MessageBubble({
     <div className={`flex gap-3 ${msg.role === "user" ? "justify-end" : ""}`}>
       {msg.role === "assistant" && (
         <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-bg-surface ring-1 ring-border-default">
-          <IconBot size={14} className="text-text-tertiary" />
+          {msg.sourceGateway ? (
+            <span className="text-[14px] leading-none">{msg.sourceGateway.emoji}</span>
+          ) : (
+            <IconBot size={14} className="text-text-tertiary" />
+          )}
         </div>
       )}
       <div
@@ -1430,9 +1758,18 @@ function MessageBubble({
         className={`relative max-w-[75%] overflow-hidden rounded-xl px-3.5 py-2.5 text-[13px] leading-relaxed break-words ${
           msg.role === "user"
             ? "bg-accent-emerald/15 text-text-primary ring-1 ring-accent-emerald/20 whitespace-pre-wrap"
-            : "bg-bg-surface text-text-secondary ring-1 ring-border-default"
+            : msg.sourceGateway
+              ? "bg-bg-surface text-text-secondary ring-1 ring-border-default border-l-2 border-l-accent-emerald/40"
+              : "bg-bg-surface text-text-secondary ring-1 ring-border-default"
         }`}
       >
+        {/* Source gateway header */}
+        {msg.sourceGateway && msg.role === "assistant" && (
+          <div className="mb-1.5 flex items-center gap-1.5 text-[11px] font-medium text-accent-emerald/80">
+            <span>{msg.sourceGateway.emoji}</span>
+            <span>{msg.sourceGateway.name}</span>
+          </div>
+        )}
         {msg.role === "user" ? (
           msg.content
         ) : (

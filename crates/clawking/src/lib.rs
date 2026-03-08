@@ -6,9 +6,9 @@ mod models;
 
 pub use config::GatewayConfig;
 pub use docker::{
-    check_docker_env, compose_down, compose_status, compose_up, inspect_image,
-    pull_image_with_progress, write_auth_profiles, write_compose_files, write_openclaw_config, ComposeConfig,
-    DockerEnvStatus, PullProgress, PullResult, ServiceStatus,
+    check_docker_env, compose_down, compose_stats, compose_status, compose_up, inspect_image,
+    pull_image_with_progress, write_auth_profiles, write_compose_files, write_openclaw_config,
+    ComposeConfig, ContainerStats, DockerEnvStatus, PullProgress, PullResult, ServiceStatus,
 };
 pub use error::ClawkingError;
 pub use gateway::MasterGateway;

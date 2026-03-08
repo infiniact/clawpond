@@ -9,6 +9,8 @@ export type StoredMessage = {
   content: string;
   timestamp: string; // ISO string for serialization
   tool?: { name: string; status: "running" | "done" | "error" };
+  sourceGateway?: { id: string; name: string; emoji: string };
+  mentions?: string[];
 };
 
 const STORAGE_PREFIX = "clawpond-chat:";

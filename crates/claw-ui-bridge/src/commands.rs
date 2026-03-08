@@ -137,10 +137,16 @@ pub fn write_compose_config(
     gateway_token: String,
     provider_env_key: String,
     provider_api_key: String,
+    shared_dir: String,
 ) -> Result<(), String> {
     let expanded = shellexpand::tilde(&root_dir).to_string();
     let cfg_expanded = shellexpand::tilde(&config_dir).to_string();
     let ws_expanded = shellexpand::tilde(&workspace_dir).to_string();
+    let shared_expanded = if shared_dir.is_empty() {
+        String::new()
+    } else {
+        shellexpand::tilde(&shared_dir).to_string()
+    };
 
     clawking::write_compose_files(
         std::path::Path::new(&expanded),
@@ -154,6 +160,7 @@ pub fn write_compose_config(
             gateway_token,
             provider_env_key,
             provider_api_key,
+            shared_dir: shared_expanded,
         },
     )
 }
@@ -341,6 +348,17 @@ pub fn compose_health(root_dir: String) -> clawking::ServiceStatus {
 }
 
 #[tauri::command]
+pub async fn compose_stats(root_dir: String) -> Option<clawking::ContainerStats> {
+    let expanded = shellexpand::tilde(&root_dir).to_string();
+    tauri::async_runtime::spawn_blocking(move || {
+        clawking::compose_stats(std::path::Path::new(&expanded))
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+#[tauri::command]
 pub async fn fetch_provider_models(
     provider: String,
     api_key: String,
@@ -426,4 +444,47 @@ fn apply_snapshot(snapshot: PondSnapshot, state: &State<AppState>) -> Result<(),
     updater.restore_components(snapshot.components);
 
     Ok(())
+}
+
+/// Copy a file to {root_dir}/workspace/tmp/, creating the directory if needed.
+/// Returns the destination path inside the container: /home/node/.openclaw/workspace/tmp/{filename}
+#[tauri::command]
+pub fn copy_to_workspace(root_dir: String, source_path: String) -> Result<String, String> {
+    let expanded_root = shellexpand::tilde(&root_dir).to_string();
+    let tmp_dir = std::path::Path::new(&expanded_root).join("workspace/tmp");
+    std::fs::create_dir_all(&tmp_dir)
+        .map_err(|e| format!("Failed to create workspace/tmp: {}", e))?;
+
+    let src = std::path::Path::new(&source_path);
+    let file_name = src
+        .file_name()
+        .ok_or_else(|| "Invalid source file path".to_string())?;
+
+    let dest = tmp_dir.join(file_name);
+
+    // If a file with the same name exists, add a numeric suffix
+    let dest = if dest.exists() {
+        let stem = src.file_stem().unwrap_or_default().to_string_lossy();
+        let ext = src
+            .extension()
+            .map(|e| format!(".{}", e.to_string_lossy()))
+            .unwrap_or_default();
+        let mut n = 1u32;
+        loop {
+            let candidate = tmp_dir.join(format!("{}-{}{}", stem, n, ext));
+            if !candidate.exists() {
+                break candidate;
+            }
+            n += 1;
+        }
+    } else {
+        dest
+    };
+
+    std::fs::copy(src, &dest)
+        .map_err(|e| format!("Failed to copy file: {}", e))?;
+
+    // Return the container-relative path
+    let filename = dest.file_name().unwrap().to_string_lossy();
+    Ok(format!("/home/node/.openclaw/workspace/tmp/{}", filename))
 }

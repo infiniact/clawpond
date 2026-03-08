@@ -19,6 +19,19 @@ async fn pick_directory() -> Option<String> {
 }
 
 #[tauri::command]
+async fn pick_files() -> Vec<String> {
+    let handles = rfd::AsyncFileDialog::new()
+        .set_title("Select Files")
+        .pick_files()
+        .await;
+    handles
+        .unwrap_or_default()
+        .into_iter()
+        .map(|h| h.path().to_string_lossy().to_string())
+        .collect()
+}
+
+#[tauri::command]
 fn check_binary_exists(name: String) -> bool {
     std::process::Command::new("which")
         .arg(&name)
@@ -93,6 +106,7 @@ pub fn run() {
         .manage(AppState::new())
         .invoke_handler(tauri::generate_handler![
             pick_directory,
+            pick_files,
             check_binary_exists,
             run_shell_command,
             open_url_in_window,
@@ -118,12 +132,14 @@ pub fn run() {
             claw_ui_bridge::compose_start,
             claw_ui_bridge::compose_stop,
             claw_ui_bridge::compose_health,
+            claw_ui_bridge::compose_stats,
             claw_ui_bridge::fetch_provider_models,
             claw_ui_bridge::test_provider_model,
             claw_ui_bridge::export_snapshot,
             claw_ui_bridge::export_snapshot_to_file,
             claw_ui_bridge::import_snapshot,
             claw_ui_bridge::import_snapshot_from_file,
+            claw_ui_bridge::copy_to_workspace,
         ])
         .setup(|app| {
             if cfg!(debug_assertions) {

@@ -129,7 +129,7 @@ export const PROVIDERS: Provider[] = [
   { id: "custom", label: "Custom", envKey: "", defaultModel: "" },
 ];
 
-export function ConfigWizard({ onComplete, onClose, skipDocker, fixedRootDir }: { onComplete: (rootDir: string) => void; onClose?: () => void; skipDocker?: boolean; fixedRootDir?: string }) {
+export function ConfigWizard({ onComplete, onClose, skipDocker, fixedRootDir, sharedDir }: { onComplete: (rootDir: string) => void; onClose?: () => void; skipDocker?: boolean; fixedRootDir?: string; sharedDir?: string }) {
   const activeSteps = STEPS.filter((s) => {
     if (skipDocker && s.id === "docker") return false;
     if (fixedRootDir && s.id === "directories") return false;
@@ -368,6 +368,7 @@ export function ConfigWizard({ onComplete, onClose, skipDocker, fixedRootDir }: 
           gatewayToken,
           providerEnvKey: provider?.envKey || "",
           providerApiKey: config.apiKey,
+          sharedDir: sharedDir || "",
         });
 
         // 2. Build openclaw.json following the official OpenClaw schema
