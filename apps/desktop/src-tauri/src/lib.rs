@@ -33,20 +33,36 @@ async fn pick_files() -> Vec<String> {
 
 #[tauri::command]
 fn check_binary_exists(name: String) -> bool {
-    std::process::Command::new("which")
+    #[cfg(target_os = "windows")]
+    let result = std::process::Command::new("where")
         .arg(&name)
         .output()
         .map(|o| o.status.success())
-        .unwrap_or(false)
+        .unwrap_or(false);
+    #[cfg(not(target_os = "windows"))]
+    let result = std::process::Command::new("which")
+        .arg(&name)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    result
 }
 
 #[tauri::command]
 async fn run_shell_command(command: String) -> Result<String, String> {
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
-    let output = std::process::Command::new(&shell)
-        .args(["-l", "-c", &command])
+    #[cfg(target_os = "windows")]
+    let output = std::process::Command::new("cmd")
+        .args(["/C", &command])
         .output()
         .map_err(|e| e.to_string())?;
+    #[cfg(not(target_os = "windows"))]
+    let output = {
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+        std::process::Command::new(&shell)
+            .args(["-l", "-c", &command])
+            .output()
+            .map_err(|e| e.to_string())?
+    };
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
     } else {
@@ -84,6 +100,12 @@ fn fix_path_env() {
 }
 
 #[tauri::command]
+async fn remove_directory(path: String) -> Result<(), String> {
+    let expanded = shellexpand::tilde(&path).to_string();
+    std::fs::remove_dir_all(&expanded).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 async fn open_url_in_window(app: tauri::AppHandle, url: String, title: String) -> Result<(), String> {
     let id = WINDOW_COUNTER.fetch_add(1, Ordering::Relaxed);
     let label = format!("browser-{id}");
@@ -109,6 +131,7 @@ pub fn run() {
             pick_files,
             check_binary_exists,
             run_shell_command,
+            remove_directory,
             open_url_in_window,
             claw_ui_bridge::connect_master,
             claw_ui_bridge::get_master_status,

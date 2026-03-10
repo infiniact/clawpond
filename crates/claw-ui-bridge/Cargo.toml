@@ -19,3 +19,4 @@ claw-spawner = { path = "../claw-spawner" }
 claw-updater = { path = "../claw-updater" }
 claw-export = { path = "../claw-export" }
 base64 = "0.22"
+dirs = "6"

@@ -28,3 +28,4 @@ claw-ui-bridge = { path = "../../../crates/claw-ui-bridge" }
 claw-updater = { path = "../../../crates/claw-updater" }
 rfd = "0.15"
 url = "2"
+shellexpand = "3"

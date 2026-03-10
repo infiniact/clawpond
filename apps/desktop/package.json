@@ -10,7 +10,9 @@
     "tauri": "tauri",
     "dist": "bash -c 'for v in /Volumes/clawpond*; do hdiutil detach \"$v\" -force 2>/dev/null; done; true' && tauri build --target universal-apple-darwin",
     "dist:mac-arm": "bash -c 'for v in /Volumes/clawpond*; do hdiutil detach \"$v\" -force 2>/dev/null; done; true' && tauri build --target aarch64-apple-darwin",
-    "dist:mac-x64": "bash -c 'for v in /Volumes/clawpond*; do hdiutil detach \"$v\" -force 2>/dev/null; done; true' && tauri build --target x86_64-apple-darwin"
+    "dist:mac-x64": "bash -c 'for v in /Volumes/clawpond*; do hdiutil detach \"$v\" -force 2>/dev/null; done; true' && tauri build --target x86_64-apple-darwin",
+    "dist:win-x64": "tauri build --target x86_64-pc-windows-msvc",
+    "dist:win-arm": "tauri build --target aarch64-pc-windows-msvc"
   },
   "dependencies": {
     "@clawpond/chattools-config": "workspace:*",

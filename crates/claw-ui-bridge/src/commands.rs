@@ -188,18 +188,22 @@ pub fn write_auth_profiles(
 /// Returns the root_dir if found, None otherwise.
 #[tauri::command]
 pub fn detect_config() -> Option<String> {
-    let candidates = [
-        "~/clawpond/clawking",
-        "~/clawpond",
-    ];
-    for candidate in &candidates {
-        let expanded = shellexpand::tilde(candidate).to_string();
+    let candidates = if cfg!(target_os = "windows") {
+        vec![
+            dirs::home_dir().map(|h| h.join("clawpond\\clawking").to_string_lossy().to_string()),
+            dirs::home_dir().map(|h| h.join("clawpond").to_string_lossy().to_string()),
+        ]
+    } else {
+        vec![
+            Some("~/clawpond/clawking".to_string()),
+            Some("~/clawpond".to_string()),
+        ]
+    };
+    for candidate in candidates.into_iter().flatten() {
+        let expanded = shellexpand::tilde(&candidate).to_string();
         let root = std::path::Path::new(&expanded);
-        // Check for docker-compose.yml in root and openclaw.json in config/
-        let has_compose = root.join("docker-compose.yml").exists();
-        let has_config = root.join("config/openclaw.json").exists();
-        if has_compose || has_config {
-            return Some(candidate.to_string());
+        if root.join("docker-compose.yml").exists() || root.join("config/openclaw.json").exists() {
+            return Some(candidate);
         }
     }
     None

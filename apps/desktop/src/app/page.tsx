@@ -536,7 +536,7 @@ export default function Home() {
     if (deleteFiles && gw.rootDir) {
       try {
         const { invoke } = await import("@tauri-apps/api/core");
-        await invoke("run_shell_command", { command: `rm -rf "${gw.rootDir}"` });
+        await invoke("remove_directory", { path: gw.rootDir });
       } catch { /* ignore */ }
     }
 
