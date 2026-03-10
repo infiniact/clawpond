@@ -396,6 +396,37 @@ export function ConfigWizard({ onComplete, onClose, skipDocker, fixedRootDir, sh
   const step = activeSteps[currentStep];
   const isLast = currentStep === activeSteps.length - 1;
 
+  // Per-step validation — determines whether the "Next" button is enabled
+  const canProceed = (() => {
+    switch (step.id) {
+      case "docker":
+        return !!dockerStatus.docker && !!dockerStatus.compose && !!imageExists && !!playwrightImageExists;
+      case "directories":
+        return config.rootDir.trim().length > 0;
+      case "gateway": {
+        const gp = parseInt(config.gatewayPort, 10);
+        const bp = parseInt(config.bridgePort, 10);
+        return (
+          !isNaN(gp) && gp > 0 && gp <= 65535 &&
+          !isNaN(bp) && bp > 0 && bp <= 65535 &&
+          !portErrors.gateway && !portErrors.bridge
+        );
+      }
+      case "model": {
+        const provider = PROVIDERS.find((p) => p.id === config.modelProvider);
+        const needsKey = provider && provider.envKey !== "";
+        return (
+          config.modelProvider.length > 0 &&
+          config.modelName.trim().length > 0 &&
+          (!needsKey || config.apiKey.trim().length > 0)
+        );
+      }
+      // imageModel, channels, skills, onboard are optional / always passable
+      default:
+        return true;
+    }
+  })();
+
   const [startError, setStartError] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
 
@@ -1522,7 +1553,7 @@ export function ConfigWizard({ onComplete, onClose, skipDocker, fixedRootDir, sh
               </button>
               <button
                 onClick={handleNext}
-                disabled={starting}
+                disabled={starting || !canProceed}
                 className="inline-flex items-center gap-1.5 rounded-lg bg-accent-emerald/15 px-5 py-2 text-[12px] font-semibold text-accent-emerald ring-1 ring-accent-emerald/25 transition-all hover:bg-accent-emerald/25 disabled:opacity-50"
               >
                 {starting ? (
