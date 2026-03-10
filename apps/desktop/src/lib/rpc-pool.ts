@@ -11,9 +11,7 @@ export type GatewayInfo = {
   emoji: string;
   serviceState: string;
   rootDir: string | null;
-  remoteHost?: string;
-  remotePort?: string;
-  remoteToken?: string;
+  busy?: boolean;
 };
 
 export class RpcPool {
@@ -50,25 +48,14 @@ export class RpcPool {
   private async createConnection(gateway: GatewayInfo): Promise<OpenClawRpc> {
     const rpc = new OpenClawRpc();
 
-    let host: string;
-    let port: string;
-    let token: string;
-
-    if (gateway.remoteHost && gateway.remotePort && gateway.remoteToken) {
-      host = gateway.remoteHost;
-      port = gateway.remotePort;
-      token = gateway.remoteToken;
-    } else if (gateway.rootDir) {
-      const { invoke } = await import("@tauri-apps/api/core");
-      const info = await invoke<{ port: string; token: string }>("read_gateway_info", { rootDir: gateway.rootDir });
-      host = "127.0.0.1";
-      port = info.port;
-      token = info.token;
-    } else {
-      throw new Error("Gateway has no connection info");
+    if (!gateway.rootDir) {
+      throw new Error("Gateway has no rootDir");
     }
 
-    await rpc.connect(port, token, host);
+    const { invoke } = await import("@tauri-apps/api/core");
+    const info = await invoke<{ port: string; token: string }>("read_gateway_info", { rootDir: gateway.rootDir });
+
+    await rpc.connect(info.port, info.token, "127.0.0.1");
     return rpc;
   }
 

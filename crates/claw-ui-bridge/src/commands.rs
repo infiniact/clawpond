@@ -214,23 +214,27 @@ pub fn read_gateway_info(root_dir: String) -> Result<GatewayInfo, String> {
         .map_err(|e| format!("Failed to read .env: {}", e))?;
 
     let mut port = "18789".to_string();
+    let mut bridge_port = "18790".to_string();
     let mut token = String::new();
 
     for line in content.lines() {
         let line = line.trim();
         if let Some(val) = line.strip_prefix("OPENCLAW_GATEWAY_PORT=") {
             port = val.to_string();
+        } else if let Some(val) = line.strip_prefix("OPENCLAW_BRIDGE_PORT=") {
+            bridge_port = val.to_string();
         } else if let Some(val) = line.strip_prefix("OPENCLAW_GATEWAY_TOKEN=") {
             token = val.to_string();
         }
     }
 
-    Ok(GatewayInfo { port, token })
+    Ok(GatewayInfo { port, bridge_port, token })
 }
 
 #[derive(Serialize)]
 pub struct GatewayInfo {
     pub port: String,
+    pub bridge_port: String,
     pub token: String,
 }
 
@@ -330,21 +334,82 @@ pub fn update_env_value(root_dir: String, key: String, value: String) -> Result<
 }
 
 #[tauri::command]
-pub fn compose_start(root_dir: String) -> Result<(), String> {
+pub async fn migrate_gateway_compose(root_dir: String) -> Result<bool, String> {
     let expanded = shellexpand::tilde(&root_dir).to_string();
-    clawking::compose_up(std::path::Path::new(&expanded))
+    tauri::async_runtime::spawn_blocking(move || {
+        clawking::migrate_compose_to_shared_browser(std::path::Path::new(&expanded))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-pub fn compose_stop(root_dir: String) -> Result<(), String> {
-    let expanded = shellexpand::tilde(&root_dir).to_string();
-    clawking::compose_down(std::path::Path::new(&expanded))
+pub async fn browser_start(cdp_port: String, app: AppHandle) -> Result<(), String> {
+    let browser_dir = shellexpand::tilde("~/clawpond/browser").to_string();
+    tauri::async_runtime::spawn_blocking(move || {
+        let dir = std::path::Path::new(&browser_dir);
+        clawking::write_browser_compose(dir, &cdp_port)?;
+        let _ = app.emit("browser-progress", "Starting shared browser...");
+        clawking::browser_up(dir)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-pub fn compose_health(root_dir: String) -> clawking::ServiceStatus {
+pub async fn browser_stop() -> Result<(), String> {
+    let browser_dir = shellexpand::tilde("~/clawpond/browser").to_string();
+    tauri::async_runtime::spawn_blocking(move || {
+        clawking::browser_down(std::path::Path::new(&browser_dir))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn browser_health() -> bool {
+    let browser_dir = shellexpand::tilde("~/clawpond/browser").to_string();
+    tauri::async_runtime::spawn_blocking(move || {
+        clawking::browser_status(std::path::Path::new(&browser_dir))
+    })
+    .await
+    .unwrap_or(false)
+}
+
+#[tauri::command]
+pub async fn compose_start(root_dir: String, app: AppHandle) -> Result<(), String> {
     let expanded = shellexpand::tilde(&root_dir).to_string();
-    clawking::compose_status(std::path::Path::new(&expanded))
+    tauri::async_runtime::spawn_blocking(move || {
+        clawking::compose_up_with_progress(std::path::Path::new(&expanded), |progress| {
+            let _ = app.emit("compose-start-progress", &progress);
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn compose_stop(root_dir: String) -> Result<(), String> {
+    let expanded = shellexpand::tilde(&root_dir).to_string();
+    tauri::async_runtime::spawn_blocking(move || {
+        clawking::compose_down(std::path::Path::new(&expanded))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn compose_health(root_dir: String) -> clawking::ServiceStatus {
+    let expanded = shellexpand::tilde(&root_dir).to_string();
+    tauri::async_runtime::spawn_blocking(move || {
+        clawking::compose_status(std::path::Path::new(&expanded))
+    })
+    .await
+    .unwrap_or_else(|_| clawking::ServiceStatus {
+        running: false,
+        healthy: None,
+        error: Some("Health check task failed".into()),
+    })
 }
 
 #[tauri::command]
@@ -485,6 +550,54 @@ pub fn copy_to_workspace(root_dir: String, source_path: String) -> Result<String
         .map_err(|e| format!("Failed to copy file: {}", e))?;
 
     // Return the container-relative path
+    let filename = dest.file_name().unwrap().to_string_lossy();
+    Ok(format!("/home/node/.openclaw/workspace/tmp/{}", filename))
+}
+
+/// Save base64-encoded data to {root_dir}/workspace/tmp/{file_name}.
+/// Returns the container path: /home/node/.openclaw/workspace/tmp/{filename}
+#[tauri::command]
+pub fn save_base64_to_workspace(
+    root_dir: String,
+    file_name: String,
+    base64_data: String,
+) -> Result<String, String> {
+    use base64::Engine;
+
+    let expanded_root = shellexpand::tilde(&root_dir).to_string();
+    let tmp_dir = std::path::Path::new(&expanded_root).join("workspace/tmp");
+    std::fs::create_dir_all(&tmp_dir)
+        .map_err(|e| format!("Failed to create workspace/tmp: {}", e))?;
+
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(&base64_data)
+        .map_err(|e| format!("Failed to decode base64: {}", e))?;
+
+    let src = std::path::Path::new(&file_name);
+    let dest = tmp_dir.join(&file_name);
+
+    // If a file with the same name exists, add a numeric suffix
+    let dest = if dest.exists() {
+        let stem = src.file_stem().unwrap_or_default().to_string_lossy();
+        let ext = src
+            .extension()
+            .map(|e| format!(".{}", e.to_string_lossy()))
+            .unwrap_or_default();
+        let mut n = 1u32;
+        loop {
+            let candidate = tmp_dir.join(format!("{}-{}{}", stem, n, ext));
+            if !candidate.exists() {
+                break candidate;
+            }
+            n += 1;
+        }
+    } else {
+        dest
+    };
+
+    std::fs::write(&dest, &bytes)
+        .map_err(|e| format!("Failed to write file: {}", e))?;
+
     let filename = dest.file_name().unwrap().to_string_lossy();
     Ok(format!("/home/node/.openclaw/workspace/tmp/{}", filename))
 }

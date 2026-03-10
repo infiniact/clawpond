@@ -5,12 +5,14 @@ import ReactMarkdown from "react-markdown";
 import type { Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { openUrlInWindow } from "../lib/open-url";
+import type { ComposeStartProgress } from "../app/page";
 import {
   IconChat,
   IconChevronRight,
   IconCode,
   IconSend,
   IconBot,
+  IconUser,
   IconSpinner,
   IconXCircle,
   IconShield,
@@ -23,6 +25,7 @@ import {
   IconFile,
 } from "./icons";
 import { MentionPopup } from "./mention-popup";
+import { UsageHeatmap } from "./usage-heatmap";
 import { ConfigWizard } from "./config-wizard";
 import { OpenClawRpc } from "../lib/openclaw-rpc";
 import type { RpcEvent } from "../lib/openclaw-rpc";
@@ -33,6 +36,7 @@ import {
   saveAllMessages,
   type StoredMessage,
 } from "../lib/chat-store";
+import { recordUsage, estimateTokens } from "../lib/usage-store";
 
 type Message = {
   id: string;
@@ -55,6 +59,29 @@ function textOf(content: any): string {
   if (Array.isArray(content)) return content.map(textOf).join("");
   if (content && typeof content === "object" && typeof content.text === "string") return content.text;
   return "";
+}
+
+/**
+ * Global security officer review queue — shared across all ChatView instances.
+ * Ensures only one security check runs at a time, even when multiple gateways
+ * send messages concurrently.
+ */
+let _securityQueue: Promise<{ approved: boolean; reason?: string }> = Promise.resolve({ approved: true });
+let _securityQueueOfficerId: string | undefined;
+
+function resetSecurityQueueIfChanged(officerId: string | undefined) {
+  if (_securityQueueOfficerId !== officerId) {
+    _securityQueueOfficerId = officerId;
+    _securityQueue = Promise.resolve({ approved: true });
+  }
+}
+
+function enqueueSecurityCheck(
+  fn: () => Promise<{ approved: boolean; reason?: string }>,
+): Promise<{ approved: boolean; reason?: string }> {
+  const queued = _securityQueue.then(fn, fn);
+  _securityQueue = queued;
+  return queued;
 }
 
 type ExecApproval = {
@@ -82,12 +109,13 @@ export function ChatArea({
   onConfigComplete,
   rootDir,
   serviceState,
+  lastError,
   skipDocker,
   fixedRootDir,
-  remoteHost,
-  remotePort,
-  remoteToken,
   sharedDir,
+  onBusyChange,
+  startProgress,
+  securityOfficerId,
 }: {
   hidden?: boolean;
   onToggleTaskPanel: () => void;
@@ -101,27 +129,24 @@ export function ChatArea({
   onConfigComplete: (rootDir: string) => void;
   rootDir: string | null;
   serviceState: string;
+  lastError?: string;
   skipDocker?: boolean;
   fixedRootDir?: string;
-  remoteHost?: string;
-  remotePort?: string;
-  remoteToken?: string;
   sharedDir?: string;
+  onBusyChange?: (busy: boolean) => void;
+  startProgress?: ComposeStartProgress;
+  securityOfficerId?: string;
 }) {
-  const isRemote = !!remoteHost;
-  const showWizard = !isRemote && (!configured || reconfiguring);
+  const showWizard = !configured || reconfiguring;
   const showChat = configured && !reconfiguring;
 
   return (
     <div className={`flex min-w-0 flex-1 flex-col bg-bg-base${hidden ? " hidden" : ""}`}>
       {/* ── Top bar with toggle buttons ── */}
-      <div className="flex h-10 shrink-0 items-center justify-between border-b border-border-subtle px-3">
-        <div className="flex items-center gap-2">
-          <span className="text-[16px] leading-none">{gatewayEmoji}</span>
-          <span className="text-[12px] font-medium text-text-secondary">
-            {showWizard ? `${gatewayName} Setup` : gatewayName}
-          </span>
-        </div>
+      <div className="relative z-10 flex h-10 shrink-0 items-center justify-between overflow-visible border-b border-border-subtle px-3">
+        <div className="flex items-center gap-2" />
+
+        {showChat && <UsageHeatmap gatewayId={gatewayId} />}
 
         <button
           onClick={onToggleTaskPanel}
@@ -146,7 +171,7 @@ export function ChatArea({
       </div>
       {configured && (
         <div className={`flex min-h-0 flex-1 flex-col ${showChat ? "" : "hidden"}`}>
-          <ChatView rootDir={rootDir} serviceState={serviceState} remoteHost={remoteHost} remotePort={remotePort} remoteToken={remoteToken} hidden={hidden} gatewayId={gatewayId} gatewayName={gatewayName} />
+          <ChatView rootDir={rootDir} serviceState={serviceState} lastError={lastError} startProgress={startProgress} hidden={hidden} gatewayId={gatewayId} gatewayName={gatewayName} gatewayEmoji={gatewayEmoji} onBusyChange={onBusyChange} securityOfficerId={securityOfficerId} />
         </div>
       )}
     </div>
@@ -177,7 +202,7 @@ function fromStored(msg: StoredMessage): Message {
   };
 }
 
-function ChatView({ rootDir, serviceState, remoteHost, remotePort, remoteToken, hidden, gatewayId, gatewayName }: { rootDir: string | null; serviceState: string; remoteHost?: string; remotePort?: string; remoteToken?: string; hidden?: boolean; gatewayId: string; gatewayName: string }) {
+function ChatView({ rootDir, serviceState, lastError, startProgress, hidden, gatewayId, gatewayName, gatewayEmoji, onBusyChange, securityOfficerId }: { rootDir: string | null; serviceState: string; lastError?: string; startProgress?: ComposeStartProgress; hidden?: boolean; gatewayId: string; gatewayName: string; gatewayEmoji: string; onBusyChange?: (busy: boolean) => void; securityOfficerId?: string }) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [connected, setConnected] = useState(false);
@@ -186,6 +211,14 @@ function ChatView({ rootDir, serviceState, remoteHost, remotePort, remoteToken, 
   const [restarting, setRestarting] = useState(false);
   const [restartElapsed, setRestartElapsed] = useState(0);
   const [sending, setSending] = useState(false);
+
+  // Propagate busy state to parent
+  const onBusyChangeRef = useRef(onBusyChange);
+  onBusyChangeRef.current = onBusyChange;
+  useEffect(() => {
+    onBusyChangeRef.current?.(sending);
+  }, [sending]);
+
   const [thinkingElapsed, setThinkingElapsed] = useState(0);
   const [timedOut, setTimedOut] = useState(false);
   const thinkingTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -195,7 +228,7 @@ function ChatView({ rootDir, serviceState, remoteHost, remotePort, remoteToken, 
   const [hasMore, setHasMore] = useState(false);
   const [loadedOffset, setLoadedOffset] = useState(0);
   const [loadingMore, setLoadingMore] = useState(false);
-  const [imageAttachments, setImageAttachments] = useState<{ name: string; mediaType: string; base64: string }[]>([]);
+  const [imageAttachments, setImageAttachments] = useState<{ name: string; mediaType: string; base64: string; containerPath?: string }[]>([]);
   const [fileAttachments, setFileAttachments] = useState<{ name: string; containerPath: string }[]>([]);
   const [voiceListening, setVoiceListening] = useState(false);
   const imageInputRef = useRef<HTMLInputElement>(null);
@@ -226,6 +259,101 @@ function ChatView({ rootDir, serviceState, remoteHost, remotePort, remoteToken, 
   const restartTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const restartTickRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const RESTART_GRACE_SECONDS = 30;
+
+  // Security Officer: check content with the designated security officer gateway
+  const securityOfficerIdRef = useRef(securityOfficerId);
+  securityOfficerIdRef.current = securityOfficerId;
+  const isSecurityOfficer = securityOfficerId === gatewayId;
+
+  // Reset the global security queue when securityOfficerId changes
+  resetSecurityQueueIfChanged(securityOfficerId);
+
+  async function _doSecurityCheck(
+    content: string,
+  ): Promise<{ approved: boolean; reason?: string }> {
+    // Read from ref to always get the latest value, not a stale closure capture
+    const currentOfficerId = securityOfficerIdRef.current;
+    if (!currentOfficerId || currentOfficerId === gatewayId) {
+      return { approved: true };
+    }
+    const officerGw = allGatewaysRef.current.find((g) => g.id === currentOfficerId);
+    if (!officerGw || officerGw.serviceState !== "running") {
+      return { approved: true };
+    }
+
+    try {
+      const officerRpc = await pool.getConnection(officerGw);
+      const reviewPrompt = `[安全审查] 请审查以下用户消息。如果内容安全合规，请回复"APPROVED"。如果有问题，请回复"REJECTED: 原因"。\n\n待审查内容：\n---\n${content}\n---`;
+
+      // Send review request and wait for the response
+      const result = await officerRpc.call("chat.send", {
+        sessionKey: `security-review-${Date.now().toString(36)}`,
+        idempotencyKey: `sec-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        message: reviewPrompt,
+      });
+
+      // Try to extract the response text
+      let responseText = "";
+      if (result && typeof result === "object") {
+        const r = result as Record<string, unknown>;
+        const rawContent = r.text || (r.message as Record<string, unknown>)?.content || (r.message as Record<string, unknown>)?.text || "";
+        responseText = textOf(rawContent);
+      }
+
+      // If we got a direct response, parse it
+      if (responseText) {
+        const trimmed = responseText.trim();
+        if (trimmed.startsWith("APPROVED")) {
+          return { approved: true };
+        }
+        const rejectedMatch = trimmed.match(/^REJECTED:\s*([\s\S]*)/);
+        if (rejectedMatch) {
+          return { approved: false, reason: rejectedMatch[1].trim() };
+        }
+        // If we can't parse the response, assume approved
+        return { approved: true };
+      }
+
+      // If no direct response, wait for the final event via a promise
+      return new Promise<{ approved: boolean; reason?: string }>((resolve) => {
+        const timeout = setTimeout(() => {
+          unsub();
+          resolve({ approved: true }); // timeout = allow through
+        }, 30000);
+
+        const unsub = officerRpc.onEvent((event: RpcEvent) => {
+          if (event.type === "chat" && event.payload?.state === "final") {
+            const msg = event.payload?.message;
+            const finalContent = textOf(msg?.text || msg?.content || "");
+            clearTimeout(timeout);
+            unsub();
+
+            if (finalContent) {
+              const trimmedResp = finalContent.trim();
+              if (trimmedResp.startsWith("APPROVED")) {
+                resolve({ approved: true });
+              } else {
+                const match = trimmedResp.match(/^REJECTED:\s*([\s\S]*)/);
+                resolve({ approved: false, reason: match?.[1]?.trim() || trimmedResp });
+              }
+            } else {
+              resolve({ approved: true });
+            }
+          }
+        });
+      });
+    } catch (e) {
+      console.error("[security-officer] check failed:", e);
+      return { approved: true }; // fail open
+    }
+  }
+
+  // Queued wrapper: ensures security checks are serialized globally across all gateways
+  function checkWithSecurityOfficer(
+    content: string,
+  ): Promise<{ approved: boolean; reason?: string }> {
+    return enqueueSecurityCheck(() => _doSecurityCheck(content));
+  }
 
   // Thinking timer: track elapsed time while sending, trigger timeout
   useEffect(() => {
@@ -267,6 +395,9 @@ function ChatView({ rootDir, serviceState, remoteHost, remotePort, remoteToken, 
     }
   }, [hasStreamingMsg]);
 
+  // Track whether we need to scroll to bottom after initial load
+  const needsInitialScroll = useRef(false);
+
   // Load persisted messages on mount / rootDir change
   useEffect(() => {
     if (!rootDir) return;
@@ -274,13 +405,20 @@ function ChatView({ rootDir, serviceState, remoteHost, remotePort, remoteToken, 
     setMessages(stored.map(fromStored));
     setHasMore(more);
     setLoadedOffset(stored.length);
-    // Scroll to bottom instantly on initial load — double rAF to ensure React has committed
+    needsInitialScroll.current = true;
+  }, [rootDir]);
+
+  // Scroll to bottom after messages are rendered on initial load
+  useEffect(() => {
+    if (!needsInitialScroll.current || messages.length === 0) return;
+    needsInitialScroll.current = false;
+    // Use double rAF to ensure React has committed the DOM updates
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
         scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "instant" });
       });
     });
-  }, [rootDir]);
+  }, [messages]);
 
   // Persist messages on change (debounced)
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -396,14 +534,9 @@ function ChatView({ rootDir, serviceState, remoteHost, remotePort, remoteToken, 
 
   // Connect to gateway WebSocket when service is running
   const connectRpc = useCallback(async () => {
-    const isRemote = !!remoteHost;
-    console.log(`[connectRpc] called: isRemote=${isRemote}, rootDir=${rootDir}, serviceState=${serviceState}, rpc.connected=${rpc.connected}`);
-    if (!isRemote && (!rootDir || serviceState !== "running")) {
-      console.log("[connectRpc] bail: not remote and rootDir/serviceState not ready");
-      return;
-    }
-    if (isRemote && serviceState !== "running") {
-      console.log("[connectRpc] bail: remote but serviceState not running");
+    console.log(`[connectRpc] called: rootDir=${rootDir}, serviceState=${serviceState}, rpc.connected=${rpc.connected}`);
+    if (!rootDir || serviceState !== "running") {
+      console.log("[connectRpc] bail: rootDir/serviceState not ready");
       return;
     }
 
@@ -413,26 +546,16 @@ function ChatView({ rootDir, serviceState, remoteHost, remotePort, remoteToken, 
       return;
     }
 
-    let port: string;
-    let token: string;
-    let host: string;
-
-    if (isRemote && remotePort && remoteToken) {
-      host = remoteHost;
-      port = remotePort;
-      token = remoteToken;
-    } else {
-      const { invoke } = await import("@tauri-apps/api/core");
-      const info = await invoke<{ port: string; token: string }>("read_gateway_info", { rootDir });
-      host = "127.0.0.1";
-      port = info.port;
-      token = info.token;
-    }
+    const { invoke } = await import("@tauri-apps/api/core");
+    const info = await invoke<{ port: string; token: string }>("read_gateway_info", { rootDir });
+    const host = "127.0.0.1";
+    const port = info.port;
+    const token = info.token;
 
     setConnecting(true);
     setConnError(null);
     try {
-      console.log(`[connectRpc] connecting to ${host}:${port} (isRemote=${isRemote}, rootDir=${rootDir}, token=${token ? token.slice(0, 4) + "***" : "none"})`);
+      console.log(`[connectRpc] connecting to ${host}:${port} (rootDir=${rootDir}, token=${token ? token.slice(0, 4) + "***" : "none"})`);
       await rpc.connect(port, token, host);
       setConnected(true);
       imageSupport.current = "unknown"; // re-probe on new connection
@@ -464,7 +587,7 @@ function ChatView({ rootDir, serviceState, remoteHost, remotePort, remoteToken, 
     } finally {
       setConnecting(false);
     }
-  }, [rootDir, remoteHost, remotePort, remoteToken, serviceState, restarting, exitRestartGrace]);
+  }, [rootDir, serviceState, restarting, exitRestartGrace]);
 
   // Schedule auto-reconnect with exponential backoff (use ref to break circular dep)
   const scheduleReconnectRef = useRef(() => {});
@@ -651,6 +774,13 @@ function ChatView({ rootDir, serviceState, remoteHost, remotePort, remoteToken, 
         streamMsgId.current = null;
         streamSource.current = null;
         setSending(false);
+
+        // Track token usage
+        if (content) {
+          const usage = event.payload?.usage;
+          const tokens = usage?.total_tokens || estimateTokens(content);
+          recordUsage(gatewayId, tokens);
+        }
 
         // Auto-@ detection: check if the AI reply mentions other gateways
         if (content && msg?.role === "assistant") {
@@ -944,7 +1074,12 @@ function ChatView({ rootDir, serviceState, remoteHost, remotePort, remoteToken, 
     const fileSuffix = files.length > 0
       ? "\n\n" + files.map((f) => `[File: ${f.containerPath}]`).join("\n")
       : "";
-    const fullText = (text + fileSuffix).trim();
+    // Append image container paths as fallback references
+    const imagePaths = images.filter((img) => img.containerPath);
+    const imageFileSuffix = imagePaths.length > 0
+      ? "\n\n" + imagePaths.map((img) => `[Image: ${img.containerPath}]`).join("\n")
+      : "";
+    const fullText = (text + fileSuffix + imageFileSuffix).trim();
 
     // Build content for local UI display
     const filePart = files.length > 0 ? `[${files.length} file(s)]` : "";
@@ -1002,10 +1137,46 @@ function ChatView({ rootDir, serviceState, remoteHost, remotePort, remoteToken, 
     }
 
     // Normal send to current gateway (no @ mentions)
+
+    // Security Officer: check user message before sending
+    const currentOfficerId = securityOfficerIdRef.current;
+    if (currentOfficerId && currentOfficerId !== gatewayId) {
+      const reviewMsgId = `sec-review-${Date.now()}`;
+      setMessages((prev) => [...prev, {
+        id: reviewMsgId,
+        role: "system",
+        content: "🛡️ Security review in progress...",
+        timestamp: new Date(),
+      }]);
+
+      const result = await checkWithSecurityOfficer(fullText);
+
+      // Remove the "in progress" message
+      setMessages((prev) => prev.filter((m) => m.id !== reviewMsgId));
+
+      if (!result.approved) {
+        // Show rejection as security officer speaking
+        const officerGw = allGatewaysRef.current.find((g) => g.id === currentOfficerId);
+        setMessages((prev) => [...prev, {
+          id: `sec-blocked-${Date.now()}`,
+          role: "assistant",
+          content: result.reason || "Content not approved",
+          timestamp: new Date(),
+          sourceGateway: officerGw
+            ? { id: officerGw.id, name: officerGw.name, emoji: officerGw.emoji }
+            : { id: currentOfficerId, name: "Security Officer", emoji: "🛡️" },
+        }]);
+        return;
+      }
+    }
+
     setSending(true);
     streamBuf.current = "";
     streamMsgId.current = null;
     streamSource.current = null;
+
+    // Track user message tokens
+    recordUsage(gatewayId, estimateTokens(fullText));
 
     const idempotencyKey = `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const baseParams = {
@@ -1037,17 +1208,20 @@ function ChatView({ rootDir, serviceState, remoteHost, remotePort, remoteToken, 
             content: contentBlocks,
           });
         } else {
-          // Gateway does NOT support images — send text only + show warning
+          // Gateway does NOT support multimodal — send text with file paths as fallback
           result = await rpc.call("chat.send", {
             ...baseParams,
             message: fullText || "Please describe this image.",
           });
-          setMessages((prev) => [...prev, {
-            id: `warn-${Date.now()}`,
-            role: "system",
-            content: "⚠ Current Gateway does not support image attachments. Only text was sent. Please upgrade your OpenClaw Gateway to enable multimodal support.",
-            timestamp: new Date(),
-          }]);
+          if (imagePaths.length === 0) {
+            // No container paths available — images are truly lost
+            setMessages((prev) => [...prev, {
+              id: `warn-${Date.now()}`,
+              role: "system",
+              content: "⚠ Current Gateway does not support image attachments. Only text was sent. Please upgrade your OpenClaw Gateway to enable multimodal support.",
+              timestamp: new Date(),
+            }]);
+          }
         }
       } else {
         result = await rpc.call("chat.send", {
@@ -1119,26 +1293,60 @@ function ChatView({ rootDir, serviceState, remoteHost, remotePort, remoteToken, 
     }
   }
 
-  // Image attachment handler
-  function handleImagePick(e: React.ChangeEvent<HTMLInputElement>) {
+  // Image attachment handler — reads base64 for preview and copies to workspace for agent access
+  async function handleImagePick(e: React.ChangeEvent<HTMLInputElement>) {
     const files = e.target.files;
     if (!files) return;
-    Array.from(files).forEach((file) => {
-      const reader = new FileReader();
-      reader.onload = () => {
-        const dataUrl = reader.result as string;
-        // dataUrl format: "data:<mediaType>;base64,<base64data>"
-        const match = dataUrl.match(/^data:([^;]+);base64,(.+)$/);
-        if (match) {
-          setImageAttachments((prev) => [...prev, {
-            name: file.name,
-            mediaType: match[1],
-            base64: match[2],
-          }]);
+    const fileList = Array.from(files);
+    for (const file of fileList) {
+      // Read base64 for preview
+      const dataUrl = await new Promise<string>((resolve) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result as string);
+        reader.readAsDataURL(file);
+      });
+      const match = dataUrl.match(/^data:([^;]+);base64,(.+)$/);
+      if (!match) continue;
+
+      // Copy to workspace if rootDir is available
+      let containerPath: string | undefined;
+      if (rootDir) {
+        try {
+          const { invoke } = await import("@tauri-apps/api/core");
+          // Write the file to a temp location first, then copy to workspace
+          // Use the Tauri temp file approach: write base64 to a temp file, then copy
+          const binary = atob(match[2]);
+          const bytes = new Uint8Array(binary.length);
+          for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+          const blob = new Blob([bytes], { type: match[1] });
+          // Pick alternative: write to tmp via filesystem plugin or use the file path if available
+          // In Tauri, input[type=file] provides the real path via webkitRelativePath or we can use convertFileSrc
+          // Fallback: save blob to temp and copy
+          // Actually, in Tauri desktop, File objects from <input> have a `path` property
+          const filePath = (file as unknown as { path?: string }).path;
+          if (filePath) {
+            containerPath = await invoke<string>("copy_to_workspace", { rootDir, sourcePath: filePath });
+          }
+          // Fallback: if file.path is unavailable (Tauri v2), send base64 directly
+          if (!containerPath) {
+            containerPath = await invoke<string>("save_base64_to_workspace", {
+              rootDir,
+              fileName: file.name,
+              base64Data: match[2],
+            });
+          }
+        } catch (err) {
+          console.warn("[image] Failed to copy image to workspace:", err);
         }
-      };
-      reader.readAsDataURL(file);
-    });
+      }
+
+      setImageAttachments((prev) => [...prev, {
+        name: file.name,
+        mediaType: match[1],
+        base64: match[2],
+        containerPath,
+      }]);
+    }
     // Reset so the same file can be picked again
     e.target.value = "";
   }
@@ -1295,6 +1503,50 @@ function ChatView({ rootDir, serviceState, remoteHost, remotePort, remoteToken, 
               <IconSpinner size={24} className="animate-spin text-amber-400" />
               <p className="text-[13px] text-text-tertiary">Loading Gateway...</p>
             </>
+          ) : serviceState === "starting" ? (
+            <>
+              <IconSpinner size={24} className="animate-spin text-accent-emerald" />
+              <p className="text-[13px] text-text-secondary">Starting Gateway...</p>
+              {startProgress && startProgress.stage === "pulling" && startProgress.percent != null ? (
+                <div className="w-full max-w-xs space-y-2 rounded-lg bg-bg-surface px-3.5 py-3 ring-1 ring-border-default">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] font-medium text-text-secondary">
+                      {startProgress.layers_total > 0
+                        ? `Pulling layers (${startProgress.layers_done}/${startProgress.layers_total})`
+                        : startProgress.image
+                          ? `Pulling ${startProgress.image}`
+                          : "Pulling..."}
+                    </span>
+                    <span className="text-[11px] font-medium text-accent-emerald">{startProgress.percent}%</span>
+                  </div>
+                  <div className="h-1.5 w-full overflow-hidden rounded-full bg-bg-elevated">
+                    <div
+                      className="h-full rounded-full bg-accent-emerald transition-all duration-300"
+                      style={{ width: `${startProgress.percent}%` }}
+                    />
+                  </div>
+                  <p className="truncate text-[10px] text-text-ghost">{startProgress.message}</p>
+                </div>
+              ) : (
+                <p className="text-[11px] text-text-ghost">Running docker compose up</p>
+              )}
+            </>
+          ) : serviceState === "stopping" ? (
+            <>
+              <IconSpinner size={24} className="animate-spin text-amber-400" />
+              <p className="text-[13px] text-text-secondary">Stopping Gateway...</p>
+              <p className="text-[11px] text-text-ghost">Running docker compose down</p>
+            </>
+          ) : serviceState === "error" ? (
+            <>
+              <IconXCircle size={24} className="text-accent-red" />
+              <p className="text-[13px] text-accent-red">Gateway Error</p>
+              {lastError && (
+                <pre className="mt-1 max-w-md overflow-auto rounded-lg bg-bg-elevated px-3 py-2 text-left text-[11px] leading-relaxed text-text-tertiary ring-1 ring-border-default">
+                  {lastError}
+                </pre>
+              )}
+            </>
           ) : serviceState !== "running" ? (
             <>
               <IconChat size={24} className="text-text-ghost" />
@@ -1318,6 +1570,15 @@ function ChatView({ rootDir, serviceState, remoteHost, remotePort, remoteToken, 
       {/* Messages */}
       <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-4">
         <div className="mx-auto flex max-w-2xl flex-col gap-3">
+          {/* Security Officer banner */}
+          {isSecurityOfficer && (
+            <div className="flex items-center gap-2 rounded-lg bg-amber-500/10 px-3 py-2.5 ring-1 ring-amber-500/20">
+              <IconShield size={14} className="shrink-0 text-amber-400" />
+              <span className="text-[12px] text-amber-300">
+                This gateway is the Security Officer. It only processes security review requests — direct chat is disabled.
+              </span>
+            </div>
+          )}
           {/* Load more button */}
           {hasMore && (
             <div className="flex justify-center pb-2">
@@ -1361,6 +1622,9 @@ function ChatView({ rootDir, serviceState, remoteHost, remotePort, remoteToken, 
                 <div key={msg.id} className="flex justify-center px-1">
                   <span className="rounded-md bg-bg-elevated px-2.5 py-1 text-[11px] text-text-tertiary ring-1 ring-border-subtle">
                     {msg.content}
+                    <span className="ml-2 text-[9px] text-text-ghost">
+                      {msg.timestamp.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                    </span>
                   </span>
                 </div>
               );
@@ -1371,6 +1635,7 @@ function ChatView({ rootDir, serviceState, remoteHost, remotePort, remoteToken, 
               <MessageBubble
                 key={msg.id}
                 msg={msg}
+                gatewayEmoji={gatewayEmoji}
                 onAddToContext={(text) => setInput((prev) => prev ? prev + "\n" + text : text)}
               />
             );
@@ -1560,9 +1825,9 @@ function ChatView({ rootDir, serviceState, remoteHost, remotePort, remoteToken, 
               onKeyDown={handleKeyDown}
               onCompositionStart={handleCompositionStart}
               onCompositionEnd={handleCompositionEnd}
-              placeholder="Message... (@ to mention, ⌘+Enter to send)"
+              placeholder={isSecurityOfficer ? "Security Officer — direct chat disabled" : "Message... (@ to mention, ⌘+Enter to send)"}
               rows={4}
-              disabled={sending}
+              disabled={sending || isSecurityOfficer}
               className="flex-1 resize-none bg-transparent px-3.5 py-3 text-[13px] leading-relaxed text-text-primary placeholder:text-text-ghost focus:outline-none disabled:opacity-50"
             />
           </div>
@@ -1614,7 +1879,7 @@ function ChatView({ rootDir, serviceState, remoteHost, remotePort, remoteToken, 
               />
               <button
                 onClick={() => imageInputRef.current?.click()}
-                disabled={sending}
+                disabled={sending || isSecurityOfficer}
                 className="flex h-8 w-8 items-center justify-center rounded-lg text-text-tertiary transition-colors hover:bg-bg-hover hover:text-text-secondary disabled:opacity-30"
                 title="Insert image"
               >
@@ -1622,7 +1887,7 @@ function ChatView({ rootDir, serviceState, remoteHost, remotePort, remoteToken, 
               </button>
               <button
                 onClick={handleFilePick}
-                disabled={sending || !rootDir}
+                disabled={sending || !rootDir || isSecurityOfficer}
                 className="flex h-8 w-8 items-center justify-center rounded-lg text-text-tertiary transition-colors hover:bg-bg-hover hover:text-text-secondary disabled:opacity-30"
                 title="Attach file"
               >
@@ -1630,7 +1895,7 @@ function ChatView({ rootDir, serviceState, remoteHost, remotePort, remoteToken, 
               </button>
               <button
                 onClick={handleVoiceInput}
-                disabled={sending}
+                disabled={sending || isSecurityOfficer}
                 className={`flex h-8 w-8 items-center justify-center rounded-lg transition-colors disabled:opacity-30 ${
                   voiceListening
                     ? "bg-accent-red/15 text-accent-red ring-1 ring-accent-red/25 animate-pulse"
@@ -1654,7 +1919,7 @@ function ChatView({ rootDir, serviceState, remoteHost, remotePort, remoteToken, 
             ) : (
               <button
                 onClick={handleSend}
-                disabled={!input.trim() && imageAttachments.length === 0 && fileAttachments.length === 0}
+                disabled={isSecurityOfficer || (!input.trim() && imageAttachments.length === 0 && fileAttachments.length === 0)}
                 className="flex h-9 items-center gap-1.5 rounded-xl bg-accent-emerald/15 px-4 text-[12px] font-medium text-accent-emerald ring-1 ring-accent-emerald/25 transition-all hover:bg-accent-emerald/25 disabled:opacity-30 disabled:hover:bg-accent-emerald/15"
               >
                 <IconSend size={14} />
@@ -1685,9 +1950,11 @@ const markdownComponents: Components = {
 
 function MessageBubble({
   msg,
+  gatewayEmoji,
   onAddToContext,
 }: {
   msg: Message;
+  gatewayEmoji: string;
   onAddToContext: (text: string) => void;
 }) {
   const bubbleRef = useRef<HTMLDivElement>(null);
@@ -1745,11 +2012,7 @@ function MessageBubble({
     <div className={`flex gap-3 ${msg.role === "user" ? "justify-end" : ""}`}>
       {msg.role === "assistant" && (
         <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-bg-surface ring-1 ring-border-default">
-          {msg.sourceGateway ? (
-            <span className="text-[14px] leading-none">{msg.sourceGateway.emoji}</span>
-          ) : (
-            <IconBot size={14} className="text-text-tertiary" />
-          )}
+          <span className="text-[14px] leading-none">{msg.sourceGateway ? msg.sourceGateway.emoji : gatewayEmoji}</span>
         </div>
       )}
       <div
@@ -1807,6 +2070,15 @@ function MessageBubble({
           </div>
         )}
       </div>
+      {/* Timestamp */}
+      <div className={`mt-0.5 text-[9px] text-text-ghost ${msg.role === "user" ? "text-right" : ""}`}>
+        {msg.timestamp.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+      </div>
+      {msg.role === "user" && (
+        <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-accent-emerald/10 ring-1 ring-accent-emerald/20">
+          <IconUser size={14} className="text-accent-emerald/70" />
+        </div>
+      )}
     </div>
   );
 }

@@ -129,6 +129,10 @@ pub fn run() {
             claw_ui_bridge::read_existing_config,
             claw_ui_bridge::read_openclaw_config,
             claw_ui_bridge::update_env_value,
+            claw_ui_bridge::migrate_gateway_compose,
+            claw_ui_bridge::browser_start,
+            claw_ui_bridge::browser_stop,
+            claw_ui_bridge::browser_health,
             claw_ui_bridge::compose_start,
             claw_ui_bridge::compose_stop,
             claw_ui_bridge::compose_health,
@@ -140,6 +144,7 @@ pub fn run() {
             claw_ui_bridge::import_snapshot,
             claw_ui_bridge::import_snapshot_from_file,
             claw_ui_bridge::copy_to_workspace,
+            claw_ui_bridge::save_base64_to_workspace,
         ])
         .setup(|app| {
             if cfg!(debug_assertions) {

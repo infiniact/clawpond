@@ -31,6 +31,12 @@ export function QuickModelConfig({
   const [apiKey, setApiKey] = useState("");
   const [apiEndpoint, setApiEndpoint] = useState("");
 
+  // Image model state
+  const [imageModelName, setImageModelName] = useState("");
+  const [imageProviderId, setImageProviderId] = useState("");
+  const [imageApiKey, setImageApiKey] = useState("");
+  const [imageApiEndpoint, setImageApiEndpoint] = useState("");
+
   // Load current config
   useEffect(() => {
     (async () => {
@@ -56,6 +62,22 @@ export function QuickModelConfig({
         if (providers && prefix && providers[prefix]) {
           setApiEndpoint((providers[prefix].baseUrl as string) || "");
         }
+
+        // Load image model config
+        const imageModel = defaults?.imageModel as Record<string, unknown> | undefined;
+        const imageModelPrimary = (imageModel?.primary as string) || "";
+        if (imageModelPrimary) {
+          setImageModelName(imageModelPrimary);
+          const imgPrefix = imageModelPrimary.split("/")[0];
+          const imgMatched = PROVIDERS.find((p) => p.id === imgPrefix || p.id.startsWith(imgPrefix));
+          if (imgMatched) {
+            setImageProviderId(imgMatched.id);
+            setImageApiEndpoint(imgMatched.apiBase || "");
+          }
+          if (providers && imgPrefix && providers[imgPrefix]) {
+            setImageApiEndpoint((providers[imgPrefix].baseUrl as string) || "");
+          }
+        }
       } catch {
         // Config might not exist yet
       } finally {
@@ -64,7 +86,7 @@ export function QuickModelConfig({
     })();
   }, [rootDir]);
 
-  const needsRestart = !!apiKey; // API keys live in .env — container restart required
+  const needsRestart = !!apiKey || !!imageApiKey; // API keys live in .env — container restart required
 
   async function handleSave() {
     setSaving(true);
@@ -79,6 +101,13 @@ export function QuickModelConfig({
       if (!agents.defaults) agents.defaults = {};
       const defaults = agents.defaults as Record<string, unknown>;
       defaults.model = modelName;
+
+      // Update imageModel
+      if (imageModelName) {
+        defaults.imageModel = { primary: imageModelName };
+      } else {
+        delete defaults.imageModel;
+      }
 
       // 2. Update custom provider if needed
       const provider = PROVIDERS.find((p) => p.id === providerId);
@@ -97,15 +126,52 @@ export function QuickModelConfig({
         };
       }
 
+      // 2b. Update image model custom provider if needed
+      if (imageModelName && imageProviderId) {
+        const imageProviderPrefix = imageProviderId.split("-")[0];
+        if (!builtinProviders.includes(imageProviderPrefix) && imageApiEndpoint) {
+          const imgModelId = imageModelName.includes("/") ? imageModelName.split("/").slice(1).join("/") : imageModelName;
+          if (!cfg.models) cfg.models = {};
+          const models = cfg.models as Record<string, unknown>;
+          if (!models.providers) models.providers = {};
+          const imgProviders = models.providers as Record<string, unknown>;
+          imgProviders[imageProviderPrefix] = {
+            baseUrl: imageApiEndpoint,
+            api: "openai-completions",
+            models: [{ id: imgModelId, name: imgModelId, reasoning: false, input: ["text"], contextWindow: 128000, maxTokens: 32768 }],
+          };
+        }
+      }
+
       // 3. Write config — gateway hot-reloads openclaw.json automatically (hybrid mode)
       const configDir = `${rootDir}/config`;
       await invoke("write_openclaw_config", { configDir, configJson: cfg });
 
       // 4. Update API key in .env if provided
+      let needRestart = false;
       if (apiKey && provider?.envKey) {
         await invoke("update_env_value", { rootDir, key: provider.envKey, value: apiKey });
         await invoke("write_auth_profiles", { configDir, provider: providerPrefix, apiKey });
+        needRestart = true;
+      }
 
+      // 4b. Write image model API key to auth-profiles if using a different provider
+      if (imageModelName && imageProviderId) {
+        const imgProviderPrefix = imageProviderId.split("-")[0];
+        if (imgProviderPrefix !== providerPrefix) {
+          const imgProvider = PROVIDERS.find((p) => p.id === imageProviderId);
+          const effectiveImageKey = imageApiKey || apiKey;
+          if (effectiveImageKey) {
+            if (imageApiKey && imgProvider?.envKey) {
+              await invoke("update_env_value", { rootDir, key: imgProvider.envKey, value: imageApiKey });
+            }
+            await invoke("write_auth_profiles", { configDir, provider: imgProviderPrefix, apiKey: effectiveImageKey });
+            needRestart = needRestart || !!imageApiKey;
+          }
+        }
+      }
+
+      if (needRestart) {
         // API keys are env vars — need container restart to pick them up
         await invoke("compose_stop", { rootDir });
         await invoke("compose_start", { rootDir });
@@ -146,7 +212,7 @@ export function QuickModelConfig({
           </button>
         </div>
 
-        <div className="space-y-3">
+        <div className="max-h-[60vh] space-y-3 overflow-y-auto">
           {/* Provider */}
           <div>
             <label className="mb-1 block text-[11px] font-medium text-text-secondary">Provider</label>
@@ -209,6 +275,81 @@ export function QuickModelConfig({
               />
             </div>
           )}
+
+          {/* ── Image Model Section ── */}
+          <div className="mt-1 border-t border-border-subtle pt-3">
+            <p className="mb-2 text-[11px] font-medium text-text-secondary">Image Model (optional)</p>
+
+            {/* Image Provider */}
+            <div className="mb-2">
+              <label className="mb-1 block text-[11px] font-medium text-text-tertiary">Provider</label>
+              <select
+                value={imageProviderId}
+                onChange={(e) => {
+                  const p = PROVIDERS.find((p) => p.id === e.target.value);
+                  if (p) {
+                    setImageProviderId(p.id);
+                    setImageModelName(p.defaultModel);
+                    setImageApiEndpoint(p.apiBase || "");
+                  } else {
+                    setImageProviderId("");
+                    setImageModelName("");
+                    setImageApiEndpoint("");
+                  }
+                }}
+                className="w-full rounded-lg bg-bg-elevated px-3 py-2 text-[12px] text-text-primary ring-1 ring-border-default focus:outline-none focus:ring-border-strong"
+              >
+                <option value="">None</option>
+                {PROVIDERS.map((p) => (
+                  <option key={p.id} value={p.id}>{p.label}</option>
+                ))}
+              </select>
+            </div>
+
+            {/* Image Model Name */}
+            {imageProviderId && (
+              <div className="mb-2">
+                <label className="mb-1 block text-[11px] font-medium text-text-tertiary">Model</label>
+                <input
+                  type="text"
+                  value={imageModelName}
+                  onChange={(e) => setImageModelName(e.target.value)}
+                  placeholder="provider/model-name"
+                  className="w-full rounded-lg bg-bg-elevated px-3 py-2 text-[12px] text-text-primary ring-1 ring-border-default placeholder:text-text-ghost focus:outline-none focus:ring-border-strong"
+                />
+              </div>
+            )}
+
+            {/* Image API Key */}
+            {imageProviderId && imageProviderId !== "ollama" && (
+              <div className="mb-2">
+                <label className="mb-1 block text-[11px] font-medium text-text-tertiary">
+                  {PROVIDERS.find((p) => p.id === imageProviderId)?.envKey || "API Key"}
+                </label>
+                <input
+                  type="password"
+                  value={imageApiKey}
+                  onChange={(e) => setImageApiKey(e.target.value)}
+                  placeholder="Leave empty to keep current"
+                  className="w-full rounded-lg bg-bg-elevated px-3 py-2 text-[12px] text-text-primary ring-1 ring-border-default placeholder:text-text-ghost focus:outline-none focus:ring-border-strong"
+                />
+              </div>
+            )}
+
+            {/* Image Custom Endpoint */}
+            {imageProviderId && (imageProviderId === "custom" || imageProviderId === "ollama" || imageApiEndpoint) && (
+              <div>
+                <label className="mb-1 block text-[11px] font-medium text-text-tertiary">API Endpoint</label>
+                <input
+                  type="text"
+                  value={imageApiEndpoint}
+                  onChange={(e) => setImageApiEndpoint(e.target.value)}
+                  placeholder="https://api.example.com/v1"
+                  className="w-full rounded-lg bg-bg-elevated px-3 py-2 text-[12px] text-text-primary ring-1 ring-border-default placeholder:text-text-ghost focus:outline-none focus:ring-border-strong"
+                />
+              </div>
+            )}
+          </div>
         </div>
 
         {error && <p className="mt-2 text-[11px] text-accent-red">{error}</p>}

@@ -25,11 +25,14 @@ const STEPS = [
   { id: "docker", icon: IconDownload, title: "Docker Environment", desc: "Check Docker and pull the OpenClaw image" },
   { id: "directories", icon: IconFolder, title: "Directories", desc: "Configure data and workspace directories" },
   { id: "gateway", icon: IconGlobe, title: "Gateway", desc: "Configure the OpenClaw gateway service" },
-  { id: "model", icon: IconCpu, title: "Model", desc: "Select AI model provider and verify connectivity" },
+  { id: "model", icon: IconCpu, title: "Chat Model", desc: "Select AI model provider and verify connectivity" },
+  { id: "imageModel", icon: IconLayers, title: "Image Model", desc: "Select vision model provider (optional)" },
   { id: "channels", icon: IconHash, title: "Channels", desc: "Connect chat channels" },
   { id: "skills", icon: IconZap, title: "Skills", desc: "Enable agent skills" },
   { id: "onboard", icon: IconSettings, title: "Finish", desc: "Review and start services" },
 ] as const;
+
+const PLAYWRIGHT_IMAGE = "mcr.microsoft.com/playwright:v1.52.0-noble";
 
 type StepId = (typeof STEPS)[number]["id"];
 
@@ -164,11 +167,16 @@ export function ConfigWizard({ onComplete, onClose, skipDocker, fixedRootDir, sh
       bridgePort,
       gatewayBind: "lan",
       gatewayToken: "",
-      // Model
+      // Chat Model
       modelProvider: "anthropic" as string,
       modelName: "anthropic/claude-sonnet-4-20250514",
       apiKey: "",
       apiEndpoint: "",
+      // Image Model
+      imageModelProvider: "" as string,
+      imageModelName: "",
+      imageApiKey: "",
+      imageApiEndpoint: "",
       // Channels & skills
       channels: Object.fromEntries(CHANNELS.map((ch) => [ch.id, { enabled: false, values: {} } as ChannelConfig])) as Record<string, ChannelConfig>,
       skills: [] as string[],
@@ -179,6 +187,7 @@ export function ConfigWizard({ onComplete, onClose, skipDocker, fixedRootDir, sh
   const configDir = `${config.rootDir}/config`;
   const workspaceDir = `${config.rootDir}/workspace`;
   const [imageExists, setImageExists] = useState<boolean | null>(null);
+  const [playwrightImageExists, setPlaywrightImageExists] = useState<boolean | null>(null);
   const [loading, setLoading] = useState(false);
   const [pullError, setPullError] = useState<string | null>(null);
   const [pullProgress, setPullProgress] = useState<{
@@ -186,6 +195,7 @@ export function ConfigWizard({ onComplete, onClose, skipDocker, fixedRootDir, sh
     status: string;
     layers_done: number;
     layers_total: number;
+    currentImage: string;
   } | null>(null);
   const [dockerStatus, setDockerStatus] = useState<{
     checking: boolean;
@@ -200,6 +210,12 @@ export function ConfigWizard({ onComplete, onClose, skipDocker, fixedRootDir, sh
   const [modelError, setModelError] = useState<string | null>(null);
   const [modelTesting, setModelTesting] = useState(false);
   const [modelTestResult, setModelTestResult] = useState<{ success: boolean; message?: string; error?: string } | null>(null);
+  const [imageModelList, setImageModelList] = useState<string[]>([]);
+  const [imageModelFetching, setImageModelFetching] = useState(false);
+  const [imageModelVerified, setImageModelVerified] = useState<boolean | null>(null);
+  const [imageModelError, setImageModelError] = useState<string | null>(null);
+  const [imageModelTesting, setImageModelTesting] = useState(false);
+  const [imageModelTestResult, setImageModelTestResult] = useState<{ success: boolean; message?: string; error?: string } | null>(null);
   const [portErrors, setPortErrors] = useState<{ gateway: string | null; bridge: string | null }>({ gateway: null, bridge: null });
 
   // Debounced port conflict checking
@@ -255,6 +271,18 @@ export function ConfigWizard({ onComplete, onClose, skipDocker, fixedRootDir, sh
           channels: Record<string, Record<string, unknown>> | null;
         }>("read_existing_config", { rootDir: detected });
 
+        // Pre-read full config for image model
+        let imageModelPrimary = "";
+        try {
+          const fullCfg = await invoke<Record<string, unknown>>("read_openclaw_config", { rootDir: detected });
+          const agents = fullCfg?.agents as Record<string, unknown> | undefined;
+          const defaults = agents?.defaults as Record<string, unknown> | undefined;
+          const imageModel = defaults?.imageModel as Record<string, unknown> | undefined;
+          imageModelPrimary = (imageModel?.primary as string) || "";
+        } catch {
+          // Config might not exist yet
+        }
+
         setConfig((prev) => {
           const updated = { ...prev, rootDir: detected };
           if (existing.image) updated.image = existing.image;
@@ -269,6 +297,16 @@ export function ConfigWizard({ onComplete, onClose, skipDocker, fixedRootDir, sh
             if (matchedProvider) {
               updated.modelProvider = matchedProvider.id;
               updated.apiEndpoint = matchedProvider.apiBase || "";
+            }
+          }
+          // Pre-fill image model from agents.defaults.imageModel.primary
+          if (imageModelPrimary) {
+            updated.imageModelName = imageModelPrimary;
+            const imgPrefix = imageModelPrimary.split("/")[0];
+            const imgProvider = PROVIDERS.find((p) => p.id === imgPrefix || p.id.startsWith(imgPrefix));
+            if (imgProvider) {
+              updated.imageModelProvider = imgProvider.id;
+              updated.imageApiEndpoint = imgProvider.apiBase || "";
             }
           }
           // Pre-fill channel configs (excluding secret fields like tokens/keys)
@@ -297,7 +335,7 @@ export function ConfigWizard({ onComplete, onClose, skipDocker, fixedRootDir, sh
     })();
   }, []);
 
-  // Check if Docker image already exists locally
+  // Check if Docker images already exist locally
   useEffect(() => {
     if (!config.image) {
       setImageExists(null);
@@ -307,10 +345,19 @@ export function ConfigWizard({ onComplete, onClose, skipDocker, fixedRootDir, sh
     const timer = setTimeout(async () => {
       try {
         const { invoke } = await import("@tauri-apps/api/core");
-        const exists = await invoke<boolean>("docker_image_exists", { image: config.image });
-        if (!cancelled) setImageExists(exists);
+        const [openclawExists, pwExists] = await Promise.all([
+          invoke<boolean>("docker_image_exists", { image: config.image }),
+          invoke<boolean>("docker_image_exists", { image: PLAYWRIGHT_IMAGE }),
+        ]);
+        if (!cancelled) {
+          setImageExists(openclawExists);
+          setPlaywrightImageExists(pwExists);
+        }
       } catch {
-        if (!cancelled) setImageExists(null);
+        if (!cancelled) {
+          setImageExists(null);
+          setPlaywrightImageExists(null);
+        }
       }
     }, 300);
     return () => { cancelled = true; clearTimeout(timer); };
@@ -425,6 +472,38 @@ export function ConfigWizard({ onComplete, onClose, skipDocker, fixedRootDir, sh
           }
         }
 
+        // Add imageModel to agents.defaults if configured
+        if (config.imageModelName) {
+          (openclawConfig.agents as Record<string, unknown> as { defaults: Record<string, unknown> }).defaults.imageModel = {
+            primary: config.imageModelName,
+          };
+
+          // Add image model custom provider if needed and different from chat model provider
+          const imageProviderPrefix = config.imageModelProvider.split("-")[0];
+          if (!builtinProviders.includes(imageProviderPrefix)) {
+            const imgApiBase = config.imageApiEndpoint || PROVIDERS.find((p) => p.id === config.imageModelProvider)?.apiBase || "";
+            if (imgApiBase) {
+              const imgModelId = config.imageModelName.includes("/") ? config.imageModelName.split("/").slice(1).join("/") : config.imageModelName;
+              if (!openclawConfig.models) openclawConfig.models = { providers: {} };
+              const models = openclawConfig.models as Record<string, unknown>;
+              if (!models.providers) models.providers = {};
+              const providers = models.providers as Record<string, unknown>;
+              providers[imageProviderPrefix] = {
+                baseUrl: imgApiBase,
+                api: "openai-completions",
+                models: [{
+                  id: imgModelId,
+                  name: imgModelId,
+                  reasoning: false,
+                  input: ["text"],
+                  contextWindow: 128000,
+                  maxTokens: 32768,
+                }],
+              };
+            }
+          }
+        }
+
         // Add channel configs matching OpenClaw schema
         const channels: Record<string, unknown> = {};
         const pluginEntries: Record<string, { enabled: boolean }> = {};
@@ -502,6 +581,25 @@ export function ConfigWizard({ onComplete, onClose, skipDocker, fixedRootDir, sh
           apiKey: config.apiKey,
         });
 
+        // 3b. Write image model API key to auth-profiles if using a different provider
+        if (config.imageModelName && config.imageModelProvider) {
+          const imageProviderPrefix = config.imageModelProvider.split("-")[0];
+          if (imageProviderPrefix !== providerPrefix) {
+            const imageProvider = PROVIDERS.find((p) => p.id === config.imageModelProvider);
+            const effectiveImageKey = config.imageApiKey || config.apiKey;
+            if (effectiveImageKey) {
+              if (config.imageApiKey && imageProvider?.envKey) {
+                await invoke("update_env_value", { rootDir: config.rootDir, key: imageProvider.envKey, value: config.imageApiKey });
+              }
+              await invoke("write_auth_profiles", {
+                configDir: configDir,
+                provider: imageProviderPrefix,
+                apiKey: effectiveImageKey,
+              });
+            }
+          }
+        }
+
         // 4. Start services
         await invoke("compose_start", { rootDir: config.rootDir });
         onComplete(config.rootDir);
@@ -522,12 +620,18 @@ export function ConfigWizard({ onComplete, onClose, skipDocker, fixedRootDir, sh
   async function handlePullImage() {
     setLoading(true);
     setPullError(null);
-    setPullProgress({ percent: 0, status: "Starting...", layers_done: 0, layers_total: 0 });
+    setPullProgress({ percent: 0, status: "Starting...", layers_done: 0, layers_total: 0, currentImage: config.image });
 
     let unlisten: (() => void) | undefined;
     try {
       const { invoke } = await import("@tauri-apps/api/core");
       const { listen } = await import("@tauri-apps/api/event");
+
+      // Determine which images need pulling
+      const needOpenClaw = !imageExists;
+      const needPlaywright = !playwrightImageExists;
+      const totalImages = (needOpenClaw ? 1 : 0) + (needPlaywright ? 1 : 0);
+      let pulledCount = 0;
 
       unlisten = await listen<{
         percent: number;
@@ -536,16 +640,37 @@ export function ConfigWizard({ onComplete, onClose, skipDocker, fixedRootDir, sh
         layers_total: number;
         current_layer: string | null;
       }>("docker-pull-progress", (event) => {
-        setPullProgress({
-          percent: event.payload.percent,
+        // Scale progress: each image gets an equal share of 0-100
+        const imagePercent = event.payload.percent;
+        const overallPercent = totalImages > 0
+          ? Math.round((pulledCount * 100 + imagePercent) / totalImages)
+          : imagePercent;
+        setPullProgress((prev) => ({
+          percent: overallPercent,
           status: event.payload.status,
           layers_done: event.payload.layers_done,
           layers_total: event.payload.layers_total,
-        });
+          currentImage: prev?.currentImage || config.image,
+        }));
       });
 
-      await invoke("docker_pull_image", { image: config.image });
-      setPullProgress({ percent: 100, status: "Pull complete", layers_done: 0, layers_total: 0 });
+      // Pull OpenClaw image
+      if (needOpenClaw) {
+        setPullProgress((prev) => ({ ...prev!, currentImage: config.image }));
+        await invoke("docker_pull_image", { image: config.image });
+        pulledCount++;
+        setImageExists(true);
+      }
+
+      // Pull Playwright image
+      if (needPlaywright) {
+        setPullProgress({ percent: totalImages > 1 ? 50 : 0, status: "Starting Playwright pull...", layers_done: 0, layers_total: 0, currentImage: PLAYWRIGHT_IMAGE });
+        await invoke("docker_pull_image", { image: PLAYWRIGHT_IMAGE });
+        pulledCount++;
+        setPlaywrightImageExists(true);
+      }
+
+      setPullProgress({ percent: 100, status: "All images pulled successfully", layers_done: 0, layers_total: 0, currentImage: "" });
     } catch (e) {
       setPullError(typeof e === "string" ? e : "Failed to pull image.");
       setPullProgress(null);
@@ -617,6 +742,73 @@ export function ConfigWizard({ onComplete, onClose, skipDocker, fixedRootDir, sh
       setModelTestResult({ success: false, error: typeof e === "string" ? e : "Test failed" });
     } finally {
       setModelTesting(false);
+    }
+  }
+
+  function selectImageProvider(p: Provider) {
+    setConfig((c) => ({ ...c, imageModelProvider: p.id, imageModelName: p.defaultModel, imageApiEndpoint: p.apiBase || "" }));
+    setImageModelList([]);
+    setImageModelVerified(null);
+    setImageModelError(null);
+    setImageModelTestResult(null);
+  }
+
+  async function handleFetchImageModels() {
+    const provider = PROVIDERS.find((p) => p.id === config.imageModelProvider);
+    const endpoint = config.imageApiEndpoint || provider?.apiBase || "";
+    const effectiveKey = config.imageApiKey || config.apiKey;
+    setImageModelFetching(true);
+    setImageModelError(null);
+    setImageModelList([]);
+    setImageModelVerified(null);
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const result = await invoke<{ models: string[]; error: string | null }>("fetch_provider_models", {
+        provider: config.imageModelProvider,
+        apiKey: effectiveKey,
+        customEndpoint: endpoint,
+      });
+      if (result.error) {
+        setImageModelError(result.error);
+      } else {
+        setImageModelList(result.models);
+        setImageModelVerified(true);
+        if (result.models.length > 0) {
+          if (!config.imageModelName || config.imageModelName === provider?.defaultModel) {
+            setConfig((c) => ({ ...c, imageModelName: result.models[0] }));
+          }
+        }
+      }
+    } catch (e) {
+      setImageModelError(typeof e === "string" ? e : "Failed to fetch models.");
+    } finally {
+      setImageModelFetching(false);
+    }
+  }
+
+  async function handleTestImageModel() {
+    const provider = PROVIDERS.find((p) => p.id === config.imageModelProvider);
+    const endpoint = config.imageApiEndpoint || provider?.apiBase || "";
+    const effectiveKey = config.imageApiKey || config.apiKey;
+    setImageModelTesting(true);
+    setImageModelTestResult(null);
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const result = await invoke<{ success: boolean; message: string | null; error: string | null }>("test_provider_model", {
+        provider: config.imageModelProvider,
+        apiKey: effectiveKey,
+        customEndpoint: endpoint,
+        model: config.imageModelName,
+      });
+      setImageModelTestResult({
+        success: result.success,
+        message: result.message ?? undefined,
+        error: result.error ?? undefined,
+      });
+    } catch (e) {
+      setImageModelTestResult({ success: false, error: typeof e === "string" ? e : "Test failed" });
+    } finally {
+      setImageModelTesting(false);
     }
   }
 
@@ -711,13 +903,42 @@ export function ConfigWizard({ onComplete, onClose, skipDocker, fixedRootDir, sh
                 </div>
 
                 <Field
-                  label="Image"
+                  label="OpenClaw Image"
                   value={config.image}
                   onChange={(v) => setConfig((c) => ({ ...c, image: v }))}
                   placeholder="ghcr.io/openclaw/openclaw:latest"
                   disabled={loading}
                   hint="Official image from GitHub Container Registry"
                 />
+
+                {/* Image status rows */}
+                <div className="space-y-1.5 rounded-lg bg-bg-surface px-3.5 py-3 ring-1 ring-border-default">
+                  <p className="text-[11px] font-medium text-text-secondary">Required Images</p>
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between">
+                      <span className="truncate text-[11px] text-text-tertiary">{config.image}</span>
+                      {imageExists ? (
+                        <span className="flex items-center gap-1 text-[11px] font-medium text-accent-emerald">
+                          <IconCheck size={11} />
+                          Ready
+                        </span>
+                      ) : (
+                        <span className="text-[11px] text-text-ghost">Not found</span>
+                      )}
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="truncate text-[11px] text-text-tertiary">{PLAYWRIGHT_IMAGE}</span>
+                      {playwrightImageExists ? (
+                        <span className="flex items-center gap-1 text-[11px] font-medium text-accent-emerald">
+                          <IconCheck size={11} />
+                          Ready
+                        </span>
+                      ) : (
+                        <span className="text-[11px] text-text-ghost">Not found</span>
+                      )}
+                    </div>
+                  </div>
+                </div>
 
                 {loading && pullProgress ? (
                   <div className="space-y-2 rounded-lg bg-bg-surface px-3.5 py-3 ring-1 ring-border-default">
@@ -735,13 +956,15 @@ export function ConfigWizard({ onComplete, onClose, skipDocker, fixedRootDir, sh
                         style={{ width: `${pullProgress.percent}%` }}
                       />
                     </div>
-                    <p className="truncate text-[10px] text-text-ghost">{pullProgress.status}</p>
+                    <p className="truncate text-[10px] text-text-ghost">
+                      {pullProgress.currentImage ? `${pullProgress.currentImage} — ` : ""}{pullProgress.status}
+                    </p>
                   </div>
-                ) : pullProgress?.percent === 100 || imageExists ? (
+                ) : pullProgress?.percent === 100 || (imageExists && playwrightImageExists) ? (
                   <div className="flex items-center gap-2 rounded-lg bg-accent-emerald/10 px-3.5 py-2.5 ring-1 ring-accent-emerald/20">
                     <IconCheck size={14} className="shrink-0 text-accent-emerald" />
                     <span className="text-[12px] font-medium text-accent-emerald">
-                      {pullProgress?.percent === 100 ? "Image pulled successfully" : "Image already exists locally"}
+                      {pullProgress?.percent === 100 ? "All images pulled successfully" : "All images ready"}
                     </span>
                   </div>
                 ) : (
@@ -751,7 +974,7 @@ export function ConfigWizard({ onComplete, onClose, skipDocker, fixedRootDir, sh
                     className="flex w-full items-center justify-center gap-2 rounded-lg bg-bg-elevated py-2.5 text-[12px] font-medium text-text-primary ring-1 ring-border-default transition-all hover:bg-bg-hover hover:ring-border-strong disabled:opacity-50"
                   >
                     <IconDownload size={14} />
-                    docker pull
+                    {imageExists && !playwrightImageExists ? "Pull Playwright Image" : !imageExists && playwrightImageExists ? "Pull OpenClaw Image" : "Pull All Images"}
                   </button>
                 )}
 
@@ -979,7 +1202,136 @@ export function ConfigWizard({ onComplete, onClose, skipDocker, fixedRootDir, sh
               </>
             )}
 
-            {/* ── Step 5: Channels ── */}
+            {/* ── Step 5: Image Model (Optional) ── */}
+            {step.id === "imageModel" && (
+              <>
+                <p className="text-[11px] text-text-ghost">
+                  This step is optional. Skip if you don&apos;t need a separate vision/image model.
+                </p>
+
+                <div>
+                  <label className="mb-1 block text-[11px] font-medium text-text-secondary">Provider</label>
+                  <SearchableSelect
+                    value={config.imageModelProvider}
+                    onChange={(id) => {
+                      const p = PROVIDERS.find((p) => p.id === id);
+                      if (p) selectImageProvider(p);
+                    }}
+                    options={PROVIDERS.map((p) => ({ value: p.id, label: p.label }))}
+                    placeholder="Search providers..."
+                  />
+                  {(() => {
+                    const p = PROVIDERS.find((p) => p.id === config.imageModelProvider);
+                    return p?.apiBase ? (
+                      <p className="mt-1 text-[10px] text-text-ghost">Endpoint: {p.apiBase}</p>
+                    ) : null;
+                  })()}
+                </div>
+
+                {config.imageModelProvider === "custom" && (
+                  <Field
+                    label="API Endpoint"
+                    value={config.imageApiEndpoint}
+                    onChange={(v) => setConfig((c) => ({ ...c, imageApiEndpoint: v }))}
+                    placeholder="https://api.example.com/v1"
+                    hint="OpenAI-compatible endpoint"
+                  />
+                )}
+                {config.imageModelProvider === "ollama" && (
+                  <Field
+                    label="Ollama Endpoint"
+                    value={config.imageApiEndpoint}
+                    onChange={(v) => setConfig((c) => ({ ...c, imageApiEndpoint: v }))}
+                    placeholder="http://127.0.0.1:11434"
+                    hint="Leave empty for local default"
+                  />
+                )}
+
+                {config.imageModelProvider && config.imageModelProvider !== "ollama" && (
+                  <Field
+                    label={`${PROVIDERS.find((p) => p.id === config.imageModelProvider)?.envKey || "API Key"}`}
+                    value={config.imageApiKey}
+                    onChange={(v) => { setConfig((c) => ({ ...c, imageApiKey: v })); setImageModelVerified(null); setImageModelList([]); }}
+                    placeholder="Leave empty to reuse chat model key"
+                    type="password"
+                  />
+                )}
+
+                {config.imageModelProvider && (
+                  <button
+                    onClick={handleFetchImageModels}
+                    disabled={imageModelFetching || (config.imageModelProvider !== "ollama" && !config.imageApiKey && !config.apiKey)}
+                    className="flex w-full items-center justify-center gap-2 rounded-lg bg-bg-elevated py-2.5 text-[12px] font-medium text-text-primary ring-1 ring-border-default transition-all hover:bg-bg-hover hover:ring-border-strong disabled:opacity-50"
+                  >
+                    {imageModelFetching ? (
+                      <>
+                        <IconSpinner size={14} className="animate-spin" />
+                        Fetching models...
+                      </>
+                    ) : imageModelVerified ? (
+                      <>
+                        <IconCheck size={14} className="text-accent-emerald" />
+                        Connected — {imageModelList.length} models
+                      </>
+                    ) : (
+                      <>
+                        <IconCpu size={14} />
+                        Verify & Fetch Models
+                      </>
+                    )}
+                  </button>
+                )}
+
+                {imageModelError && <p className="text-[11px] leading-relaxed text-accent-red">{imageModelError}</p>}
+
+                {imageModelList.length > 0 && (
+                  <div>
+                    <label className="mb-1 block text-[11px] font-medium text-text-secondary">Model</label>
+                    <SearchableSelect
+                      value={config.imageModelName}
+                      onChange={(v) => { setConfig((c) => ({ ...c, imageModelName: v })); setImageModelTestResult(null); }}
+                      options={imageModelList.map((m) => ({ value: m, label: m }))}
+                      placeholder="Search models..."
+                    />
+                  </div>
+                )}
+
+                {imageModelList.length > 0 && config.imageModelName && (
+                  <>
+                    <button
+                      onClick={handleTestImageModel}
+                      disabled={imageModelTesting}
+                      className="flex w-full items-center justify-center gap-2 rounded-lg bg-bg-elevated py-2.5 text-[12px] font-medium text-text-primary ring-1 ring-border-default transition-all hover:bg-bg-hover hover:ring-border-strong disabled:opacity-50"
+                    >
+                      {imageModelTesting ? (
+                        <>
+                          <IconSpinner size={14} className="animate-spin" />
+                          Testing model...
+                        </>
+                      ) : imageModelTestResult?.success ? (
+                        <>
+                          <IconCheck size={14} className="text-accent-emerald" />
+                          Test passed
+                        </>
+                      ) : (
+                        <>
+                          <IconPlay size={14} />
+                          Test Model
+                        </>
+                      )}
+                    </button>
+                    {imageModelTestResult?.success && imageModelTestResult.message && (
+                      <p className="text-[11px] text-accent-emerald">{imageModelTestResult.message}</p>
+                    )}
+                    {imageModelTestResult && !imageModelTestResult.success && imageModelTestResult.error && (
+                      <p className="text-[11px] leading-relaxed text-accent-red">{imageModelTestResult.error}</p>
+                    )}
+                  </>
+                )}
+              </>
+            )}
+
+            {/* ── Step 6: Channels (was 5) ── */}
             {step.id === "channels" && (
               <>
                 <p className="text-[12px] text-text-tertiary">Enable and configure chat channels:</p>
@@ -1103,6 +1455,14 @@ export function ConfigWizard({ onComplete, onClose, skipDocker, fixedRootDir, sh
                       <span className="text-text-ghost">Model</span>
                       <code className="font-mono text-[10px] text-text-secondary">
                         {PROVIDERS.find((p) => p.id === config.modelProvider)?.label} / {config.modelName}
+                      </code>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-text-ghost">Image Model</span>
+                      <code className="font-mono text-[10px] text-text-secondary">
+                        {config.imageModelName
+                          ? `${PROVIDERS.find((p) => p.id === config.imageModelProvider)?.label || config.imageModelProvider} / ${config.imageModelName}`
+                          : "Not configured"}
                       </code>
                     </div>
                     <div className="flex items-center gap-2">

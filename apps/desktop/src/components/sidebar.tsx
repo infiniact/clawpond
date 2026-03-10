@@ -3,6 +3,7 @@
 import {
   IconPlus,
   IconChevronRight,
+  IconShield,
 } from "./icons";
 import type { ServiceState } from "../app/page";
 
@@ -13,6 +14,8 @@ export type GatewayItem = {
   serviceState: ServiceState;
   cpuPercent?: number;
   memUsageMb?: number;
+  busy?: boolean;
+  isSecurityOfficer?: boolean;
 };
 
 export function Sidebar({
@@ -42,15 +45,17 @@ export function Sidebar({
       <div className="flex flex-1 flex-col gap-0.5 overflow-y-auto px-1 pt-2">
         {gateways.map((item) => {
           const isActive = activeItem === item.id;
-          const isLoading = item.serviceState === "loading";
+          const isLoading = item.serviceState === "loading" || item.serviceState === "starting" || item.serviceState === "stopping";
           const statusColor =
             item.serviceState === "running"
               ? "bg-accent-emerald"
               : item.serviceState === "error"
                 ? "bg-accent-red"
-                : item.serviceState === "loading"
+                : item.serviceState === "loading" || item.serviceState === "starting"
                   ? "bg-amber-400"
-                  : "bg-text-ghost";
+                  : item.serviceState === "stopping"
+                    ? "bg-amber-400"
+                    : "bg-text-ghost";
 
           return (
             <button
@@ -80,6 +85,19 @@ export function Sidebar({
                 <span
                   className={`absolute -right-1 -top-1 block h-[6px] w-[6px] rounded-full ring-1 ring-bg-deep ${statusColor}${isLoading ? " animate-pulse" : ""}`}
                 />
+                {item.busy && (
+                  <span className="absolute -bottom-1.5 left-1/2 -translate-x-1/2">
+                    <svg className="animate-spin h-[10px] w-[10px] text-accent-blue" viewBox="0 0 16 16" fill="none">
+                      <circle cx="8" cy="8" r="6" stroke="currentColor" strokeWidth="2" strokeOpacity="0.25" />
+                      <path d="M14 8a6 6 0 0 0-6-6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+                    </svg>
+                  </span>
+                )}
+                {item.isSecurityOfficer && (
+                  <span className="absolute -bottom-1 -right-1.5" title="Security Officer">
+                    <IconShield size={9} className="text-amber-400" />
+                  </span>
+                )}
               </div>
 
               {expanded ? (

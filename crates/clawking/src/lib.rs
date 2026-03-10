@@ -6,9 +6,12 @@ mod models;
 
 pub use config::GatewayConfig;
 pub use docker::{
-    check_docker_env, compose_down, compose_stats, compose_status, compose_up, inspect_image,
-    pull_image_with_progress, write_auth_profiles, write_compose_files, write_openclaw_config,
-    ComposeConfig, ContainerStats, DockerEnvStatus, PullProgress, PullResult, ServiceStatus,
+    browser_down, browser_status, browser_up, check_docker_env, compose_down, compose_stats,
+    compose_status, compose_up, compose_up_with_progress, inspect_image,
+    migrate_compose_to_shared_browser, pull_image_with_progress, update_browser_sidecar,
+    write_auth_profiles, write_browser_compose, write_compose_files, write_openclaw_config,
+    ComposeConfig, ComposeUpProgress, ContainerStats, DockerEnvStatus, PullProgress, PullResult,
+    ServiceStatus,
 };
 pub use error::ClawkingError;
 pub use gateway::MasterGateway;

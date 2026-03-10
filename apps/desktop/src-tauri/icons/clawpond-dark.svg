@@ -1,27 +1,37 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
-  <!-- Dark background squircle -->
-  <rect width="512" height="512" rx="115" ry="115" fill="#1E2028"/>
-  <rect x="2" y="2" width="508" height="508" rx="113" ry="113" fill="none" stroke="#2E3140" stroke-width="2"/>
+  <defs>
+    <linearGradient id="bgGradient" x1="0%" y1="100%" x2="0%" y2="0%">
+      <stop offset="0%" stop-color="#1565C0" />
+      <stop offset="100%" stop-color="#D0D8E0" />
+    </linearGradient>
+  </defs>
+  <!-- Gradient background squircle -->
+  <rect width="512" height="512" rx="115" ry="115" fill="url(#bgGradient)"/>
+
+  <!-- Water Ripples -->
+  <circle cx="256" cy="256" r="160" fill="none" stroke="white" stroke-width="3" opacity="0.3"/>
+  <circle cx="256" cy="256" r="200" fill="none" stroke="white" stroke-width="2" opacity="0.2"/>
+  <circle cx="256" cy="256" r="240" fill="none" stroke="white" stroke-width="1" opacity="0.1"/>
 
   <!--
     Three 🦞 arranged at 120° intervals on a circle.
     Tails point toward center, heads face outward.
-    R=115 from center to emoji center, font-size=100.
-    Tail-to-center gap ≈ 65, Head-to-border ≈ 91.
+    R=115 from center to emoji center, font-size=160.
+    Tail-to-center gap ≈ 35, Head-to-border ≈ 61.
     Transform: move to center → rotate to position angle → move outward along radius → rotate emoji so head faces out
   -->
   <g transform="translate(256,256)">
     <!-- Top lobster (0°, pointing up) -->
     <g transform="rotate(0) translate(0,-115)">
-      <text transform="rotate(-90)" font-size="100" text-anchor="middle" dominant-baseline="central" style="font-family:'Apple Color Emoji','Segoe UI Emoji','Noto Color Emoji',sans-serif">🦞</text>
+      <text transform="rotate(-90)" font-size="160" text-anchor="middle" dominant-baseline="central" style="font-family:'Apple Color Emoji','Segoe UI Emoji','Noto Color Emoji',sans-serif">🦞</text>
     </g>
     <!-- Bottom-right lobster (120°) -->
     <g transform="rotate(120) translate(0,-115)">
-      <text transform="rotate(-90)" font-size="100" text-anchor="middle" dominant-baseline="central" style="font-family:'Apple Color Emoji','Segoe UI Emoji','Noto Color Emoji',sans-serif">🦞</text>
+      <text transform="rotate(-90)" font-size="160" text-anchor="middle" dominant-baseline="central" style="font-family:'Apple Color Emoji','Segoe UI Emoji','Noto Color Emoji',sans-serif">🦞</text>
     </g>
     <!-- Bottom-left lobster (240°) -->
     <g transform="rotate(240) translate(0,-115)">
-      <text transform="rotate(-90)" font-size="100" text-anchor="middle" dominant-baseline="central" style="font-family:'Apple Color Emoji','Segoe UI Emoji','Noto Color Emoji',sans-serif">🦞</text>
+      <text transform="rotate(-90)" font-size="160" text-anchor="middle" dominant-baseline="central" style="font-family:'Apple Color Emoji','Segoe UI Emoji','Noto Color Emoji',sans-serif">🦞</text>
     </g>
   </g>
 </svg>

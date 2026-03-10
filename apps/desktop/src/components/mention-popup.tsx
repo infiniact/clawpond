@@ -54,7 +54,7 @@ export function MentionPopup({
       if (e.key === "Enter" || e.key === "Tab") {
         e.preventDefault();
         const gw = filtered[selectedIndex];
-        if (gw && gw.serviceState === "running") {
+        if (gw && gw.serviceState === "running" && !gw.busy) {
           onSelect(gw);
         }
         return;
@@ -96,19 +96,21 @@ export function MentionPopup({
       </div>
       {filtered.map((gw, i) => {
         const isRunning = gw.serviceState === "running";
+        const isBusy = !!gw.busy;
+        const isAvailable = isRunning && !isBusy;
         const isSelected = i === selectedIndex;
         return (
           <button
             key={gw.id}
             onClick={() => {
-              if (isRunning) onSelect(gw);
+              if (isAvailable) onSelect(gw);
             }}
             onMouseEnter={() => setSelectedIndex(i)}
-            disabled={!isRunning}
+            disabled={!isAvailable}
             className={`flex w-full items-center gap-2.5 px-3 py-2 text-left text-[12px] transition-colors ${
               isSelected ? "bg-bg-hover" : ""
             } ${
-              isRunning
+              isAvailable
                 ? "text-text-primary hover:bg-bg-hover"
                 : "cursor-not-allowed text-text-ghost opacity-50"
             }`}
@@ -118,7 +120,10 @@ export function MentionPopup({
             {!isRunning && (
               <span className="text-[10px] text-text-ghost">stopped</span>
             )}
-            {isRunning && (
+            {isRunning && isBusy && (
+              <span className="text-[10px] text-amber-400">busy</span>
+            )}
+            {isAvailable && (
               <span className="h-1.5 w-1.5 rounded-full bg-accent-emerald" />
             )}
           </button>

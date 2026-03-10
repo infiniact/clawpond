@@ -1,44 +1,37 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
   <defs>
-    <g id="lobster">
-      <ellipse cx="0" cy="8" rx="11" ry="18" fill="#E8453C"/>
-      <ellipse cx="0" cy="-12" rx="9" ry="8" fill="#E8453C"/>
-      <path d="M-9,-5 C-16,-10 -20,-14 -22,-10" stroke="#E8453C" stroke-width="4.5" fill="none" stroke-linecap="round"/>
-      <path d="M-22,-10 C-26,-16 -30,-16 -31,-13" stroke="#D63B33" stroke-width="3.8" fill="none" stroke-linecap="round"/>
-      <path d="M-22,-10 C-26,-6 -30,-5 -31,-7" stroke="#D63B33" stroke-width="3.8" fill="none" stroke-linecap="round"/>
-      <path d="M9,-5 C16,-10 20,-14 22,-10" stroke="#E8453C" stroke-width="4.5" fill="none" stroke-linecap="round"/>
-      <path d="M22,-10 C26,-16 30,-16 31,-13" stroke="#D63B33" stroke-width="3.8" fill="none" stroke-linecap="round"/>
-      <path d="M22,-10 C26,-6 30,-5 31,-7" stroke="#D63B33" stroke-width="3.8" fill="none" stroke-linecap="round"/>
-      <ellipse cx="0" cy="24" rx="9" ry="5" fill="#D63B33"/>
-      <ellipse cx="0" cy="30" rx="7" ry="4" fill="#C4332C"/>
-      <path d="M0,33 L-9,42 L-4,36 L0,44 L4,36 L9,42 Z" fill="#C4332C"/>
-      <path d="M-4,-18 C-7,-28 -12,-34 -16,-36" stroke="#E8453C" stroke-width="2" fill="none" stroke-linecap="round"/>
-      <path d="M4,-18 C7,-28 12,-34 16,-36" stroke="#E8453C" stroke-width="2" fill="none" stroke-linecap="round"/>
-      <circle cx="-4.5" cy="-15" r="2.2" fill="#fff"/>
-      <circle cx="4.5" cy="-15" r="2.2" fill="#fff"/>
-      <circle cx="-4" cy="-15.5" r="0.9" fill="#1E2028" opacity="0.8"/>
-      <circle cx="5" cy="-15.5" r="0.9" fill="#1E2028" opacity="0.8"/>
-      <line x1="-10" y1="3" x2="-17" y2="8" stroke="#D63B33" stroke-width="2" stroke-linecap="round"/>
-      <line x1="-10" y1="10" x2="-17" y2="15" stroke="#D63B33" stroke-width="2" stroke-linecap="round"/>
-      <line x1="-10" y1="17" x2="-16" y2="22" stroke="#D63B33" stroke-width="2" stroke-linecap="round"/>
-      <line x1="10" y1="3" x2="17" y2="8" stroke="#D63B33" stroke-width="2" stroke-linecap="round"/>
-      <line x1="10" y1="10" x2="17" y2="15" stroke="#D63B33" stroke-width="2" stroke-linecap="round"/>
-      <line x1="10" y1="17" x2="16" y2="22" stroke="#D63B33" stroke-width="2" stroke-linecap="round"/>
-    </g>
+    <linearGradient id="bgGradient" x1="0%" y1="100%" x2="0%" y2="0%">
+      <stop offset="0%" stop-color="#D0D8E0" />
+      <stop offset="100%" stop-color="#B3D4E6" />
+    </linearGradient>
   </defs>
+  <!-- Gradient background squircle -->
+  <rect width="512" height="512" rx="115" ry="115" fill="url(#bgGradient)"/>
 
-  <!-- Light background squircle -->
-  <rect width="512" height="512" rx="115" ry="115" fill="#FFFFFF"/>
-  <rect x="2" y="2" width="508" height="508" rx="113" ry="113" fill="none" stroke="#E5E7EB" stroke-width="2"/>
+  <!-- Water Ripples -->
+  <circle cx="256" cy="256" r="160" fill="none" stroke="white" stroke-width="3" opacity="0.3"/>
+  <circle cx="256" cy="256" r="200" fill="none" stroke="white" stroke-width="2" opacity="0.2"/>
+  <circle cx="256" cy="256" r="240" fill="none" stroke="white" stroke-width="1" opacity="0.1"/>
 
-  <!-- Equilateral triangle: center=(256,262), radius=98 -->
-  <g transform="translate(256, 164) scale(2.0)">
-    <use href="#lobster"/>
-  </g>
-  <g transform="translate(171, 311) scale(2.0) rotate(120)">
-    <use href="#lobster"/>
-  </g>
-  <g transform="translate(341, 311) scale(2.0) rotate(-120)">
-    <use href="#lobster"/>
+  <!--
+    Three 🦞 arranged at 120° intervals on a circle.
+    Tails point toward center, heads face outward.
+    R=115 from center to emoji center, font-size=180.
+    Tail-to-center gap ≈ 35, Head-to-border ≈ 61.
+    Transform: move to center → rotate to position angle → move outward along radius → rotate emoji so head faces out
+  -->
+  <g transform="translate(256,256)">
+    <!-- Top lobster (0°, pointing up) -->
+    <g transform="rotate(0) translate(0,-115)">
+      <text transform="rotate(-90)" font-size="180" text-anchor="middle" dominant-baseline="central" style="font-family:'Apple Color Emoji','Segoe UI Emoji','Noto Color Emoji',sans-serif">🦞</text>
+    </g>
+    <!-- Bottom-right lobster (120°) -->
+    <g transform="rotate(120) translate(0,-115)">
+      <text transform="rotate(-90)" font-size="180" text-anchor="middle" dominant-baseline="central" style="font-family:'Apple Color Emoji','Segoe UI Emoji','Noto Color Emoji',sans-serif">🦞</text>
+    </g>
+    <!-- Bottom-left lobster (240°) -->
+    <g transform="rotate(240) translate(0,-115)">
+      <text transform="rotate(-90)" font-size="180" text-anchor="middle" dominant-baseline="central" style="font-family:'Apple Color Emoji','Segoe UI Emoji','Noto Color Emoji',sans-serif">🦞</text>
+    </g>
   </g>
 </svg>

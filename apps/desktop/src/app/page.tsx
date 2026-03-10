@@ -5,13 +5,22 @@ import { Sidebar, type GatewayItem } from "../components/sidebar";
 import { ChatArea } from "../components/chat-area";
 import { TaskPanel } from "../components/task-panel";
 import { TopBar } from "../components/top-bar";
-import { IconPlay, IconStop, IconSettings, IconX, IconGlobe, IconPlus, IconSearch, IconCpu, IconHash, IconFolder, IconDownload, IconCheck, IconSpinner, IconXCircle, IconArrowRight, IconShield } from "../components/icons";
+import { IconPlay, IconStop, IconSettings, IconX, IconGlobe, IconPlus, IconSearch, IconCpu, IconHash, IconFolder, IconDownload, IconCheck, IconSpinner, IconXCircle, IconArrowRight, IconShield, IconSun, IconMoon } from "../components/icons";
 import { QuickModelConfig, QuickChannelsConfig } from "../components/quick-config";
 import { RpcPoolProvider } from "../lib/rpc-pool-context";
 import type { GatewayInfo } from "../lib/rpc-pool";
 import { openUrlInWindow } from "../lib/open-url";
 
-export type ServiceState = "unconfigured" | "loading" | "running" | "error" | "stopped";
+export type ServiceState = "unconfigured" | "loading" | "starting" | "stopping" | "running" | "error" | "stopped";
+
+export type ComposeStartProgress = {
+  stage: string;
+  message: string;
+  image: string | null;
+  percent: number | null;
+  layers_done: number;
+  layers_total: number;
+};
 
 export type Gateway = {
   id: string;
@@ -23,6 +32,9 @@ export type Gateway = {
   serviceState: ServiceState;
   cpuPercent?: number;
   memUsageMb?: number;
+  busy?: boolean;
+  lastError?: string;
+  startProgress?: ComposeStartProgress;
 };
 
 /** Persisted gateway shape (no runtime state like serviceState) */
@@ -37,6 +49,9 @@ type StoredGateway = {
 
 const GATEWAYS_STORAGE_KEY = "clawpond-gateways";
 const SHARED_DIR_STORAGE_KEY = "clawpond-shared-dir";
+const BROWSER_CDP_PORT = "18790";
+const THEME_STORAGE_KEY = "clawpond-theme";
+const SECURITY_OFFICER_STORAGE_KEY = "clawpond-security-officer";
 
 function loadGateways(): Gateway[] {
   try {
@@ -130,12 +145,40 @@ export default function Home() {
   const [addGatewayModal, setAddGatewayModal] = useState(false);
   const [reconfiguring, setReconfiguring] = useState(false);
   const [quickConfig, setQuickConfig] = useState<"model" | "channels" | null>(null);
-  const [deleteConfirm, setDeleteConfirm] = useState<{ gatewayId: string; name: string; rootDir: string | null; type: GatewayType } | null>(null);
+  const [deleteConfirm, setDeleteConfirm] = useState<{ gatewayId: string; name: string; rootDir: string | null } | null>(null);
   const [settingsModal, setSettingsModal] = useState(false);
   const [sharedDir, setSharedDir] = useState(() => {
     try { return localStorage.getItem(SHARED_DIR_STORAGE_KEY) || ""; } catch { return ""; }
   });
   const [settingsDraft, setSettingsDraft] = useState("");
+  const [browserRunning, setBrowserRunning] = useState(false);
+  const [theme, setTheme] = useState<"dark" | "light">(() => {
+    try { return (localStorage.getItem(THEME_STORAGE_KEY) as "dark" | "light") || "dark"; } catch { return "dark"; }
+  });
+  const [securityOfficerId, setSecurityOfficerId] = useState<string | null>(() => {
+    try { return localStorage.getItem(SECURITY_OFFICER_STORAGE_KEY) || null; } catch { return null; }
+  });
+
+  // Apply theme to <html> element
+  useEffect(() => {
+    document.documentElement.setAttribute("data-theme", theme);
+  }, [theme]);
+
+  function toggleTheme() {
+    const next = theme === "dark" ? "light" : "dark";
+    setTheme(next);
+    localStorage.setItem(THEME_STORAGE_KEY, next);
+  }
+
+  function toggleSecurityOfficer(gatewayId: string) {
+    if (securityOfficerId === gatewayId) {
+      setSecurityOfficerId(null);
+      localStorage.removeItem(SECURITY_OFFICER_STORAGE_KEY);
+    } else {
+      setSecurityOfficerId(gatewayId);
+      localStorage.setItem(SECURITY_OFFICER_STORAGE_KEY, gatewayId);
+    }
+  }
 
   // Persist gateways whenever the list changes
   useEffect(() => {
@@ -145,6 +188,7 @@ export default function Home() {
   // Context menu state — includes which gateway was right-clicked
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; gatewayId: string } | null>(null);
   const [ctxEndpoint, setCtxEndpoint] = useState<string | null>(null);
+  const [ctxCdpEndpoint, setCtxCdpEndpoint] = useState<string | null>(null);
   const ctxRef = useRef<HTMLDivElement>(null);
 
   const activeGateway = gateways.find((g) => g.id === activeGatewayId) || gateways[0];
@@ -169,13 +213,18 @@ export default function Home() {
     const gw = gateways.find((g) => g.id === gatewayId);
     if (gw?.rootDir) {
       setCtxEndpoint(null);
+      setCtxCdpEndpoint(null);
       import("@tauri-apps/api/core").then(({ invoke }) =>
-        invoke<{ port: string; token: string }>("read_gateway_info", { rootDir: gw.rootDir })
-          .then((info) => setCtxEndpoint(`127.0.0.1:${info.port}`))
-          .catch(() => setCtxEndpoint(null))
+        invoke<{ port: string; bridge_port: string; token: string }>("read_gateway_info", { rootDir: gw.rootDir })
+          .then((info) => {
+            setCtxEndpoint(`127.0.0.1:${info.port}`);
+            setCtxCdpEndpoint(`127.0.0.1:${BROWSER_CDP_PORT}`);
+          })
+          .catch(() => { setCtxEndpoint(null); setCtxCdpEndpoint(null); })
       );
     } else {
       setCtxEndpoint(null);
+      setCtxCdpEndpoint(null);
     }
   }, [gateways]);
 
@@ -228,6 +277,10 @@ export default function Home() {
       setQuickConfig("channels");
       return;
     }
+    if (action === "security-officer") {
+      toggleSecurityOfficer(targetId);
+      return;
+    }
     if (action === "open-gateway") {
       if (!rootDir) return;
       try {
@@ -242,27 +295,44 @@ export default function Home() {
     try {
       const { invoke } = await import("@tauri-apps/api/core");
       if (action === "start") {
-        await invoke("compose_start", { rootDir });
-        updateGateway(targetId, { serviceState: "running" });
+        updateGateway(targetId, { serviceState: "starting", lastError: undefined, startProgress: undefined });
+        let unlisten: (() => void) | undefined;
+        try {
+          // Auto-start global shared browser if not running
+          if (!browserRunning) {
+            await invoke("browser_start", { cdpPort: BROWSER_CDP_PORT }).catch(() => {});
+            setBrowserRunning(true);
+          }
+          const { listen } = await import("@tauri-apps/api/event");
+          unlisten = await listen<ComposeStartProgress>("compose-start-progress", (event) => {
+            updateGateway(targetId, { startProgress: event.payload });
+          });
+          await invoke("compose_start", { rootDir });
+          updateGateway(targetId, { serviceState: "running", lastError: undefined, startProgress: undefined });
+        } finally {
+          unlisten?.();
+        }
       } else if (action === "stop") {
+        updateGateway(targetId, { serviceState: "stopping", lastError: undefined });
         await invoke("compose_stop", { rootDir });
-        updateGateway(targetId, { serviceState: "stopped", cpuPercent: undefined, memUsageMb: undefined });
+        updateGateway(targetId, { serviceState: "stopped", cpuPercent: undefined, memUsageMb: undefined, lastError: undefined });
       }
-    } catch {
-      updateGateway(targetId, { serviceState: "error" });
+    } catch (err) {
+      updateGateway(targetId, { serviceState: "error", lastError: String(err), startProgress: undefined });
     }
     checkHealth();
   }
 
   // On startup: check health for ALL configured gateways
   useEffect(() => {
+    let cancelled = false;
     (async () => {
       const { invoke } = await import("@tauri-apps/api/core");
 
       // Auto-detect default gateway config
       try {
         const detected = await invoke<string | null>("detect_config");
-        if (detected) {
+        if (!cancelled && detected) {
           setGateways((prev) =>
             prev.map((g) =>
               g.id === "default" && !g.configured
@@ -273,23 +343,53 @@ export default function Home() {
         }
       } catch { /* no existing config */ }
 
-      // Now check health for every configured gateway
-      setGateways((prev) => {
-        for (const gw of prev) {
-          if (!gw.configured || !gw.rootDir) continue;
-          checkGatewayHealth(invoke, gw.id, gw.rootDir);
+      if (cancelled) return;
+
+      // Migrate existing gateway compose files from legacy per-gateway browser to shared-network format.
+      // This will `compose down` + rewrite compose for any gateway still using the old `openclaw-browser` service.
+      try {
+        const currentGateways = gatewaysRef.current;
+        for (const gw of currentGateways) {
+          if (cancelled) break;
+          if (gw.configured && gw.rootDir) {
+            await invoke<boolean>("migrate_gateway_compose", { rootDir: gw.rootDir }).catch(() => {});
+          }
         }
+      } catch { /* ignore */ }
+
+      if (cancelled) return;
+
+      // Check global shared browser status
+      try {
+        const running = await invoke<boolean>("browser_health");
+        if (!cancelled) setBrowserRunning(running);
+      } catch { /* ignore */ }
+
+      if (cancelled) return;
+
+      // Now check health for every configured gateway — sequentially to avoid flooding
+      setGateways((prev) => {
+        (async () => {
+          for (const gw of prev) {
+            if (cancelled) break;
+            if (!gw.configured || !gw.rootDir) continue;
+            await checkGatewayHealth(invoke, gw.id, gw.rootDir);
+          }
+        })();
         return prev;
       });
     })();
+    return () => { cancelled = true; };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Check health for a single docker/local gateway
+  // Guard against overlapping health checks
+  const healthCheckBusy = useRef(false);
+
+  // Check health for a single gateway
   async function checkGatewayHealth(
     invoke: <T>(cmd: string, args?: Record<string, unknown>) => Promise<T>,
     gwId: string,
     rootDir: string,
-    gwType: GatewayType
   ) {
     try {
       const status = await invoke<{
@@ -302,12 +402,21 @@ export default function Home() {
         ? status.healthy === false ? "error" : "running"
         : "stopped";
 
+      // Don't overwrite transitional or error-with-detail states
+      const current = gatewaysRef.current.find((g) => g.id === gwId);
+      if (current) {
+        const cs = current.serviceState;
+        if (cs === "starting" || cs === "stopping") return;
+        // Don't clear a detailed error with a generic "stopped"
+        if (cs === "error" && current.lastError && serviceState === "stopped") return;
+      }
+
       updateGateway(gwId, isRunning
         ? { serviceState }
         : { serviceState, cpuPercent: undefined, memUsageMb: undefined });
 
       // Fetch stats in background
-      if (isRunning && gwType === "docker") {
+      if (isRunning) {
         invoke<{ cpu_percent: number; mem_usage_mb: number } | null>(
           "compose_stats", { rootDir }
         ).then((stats) => {
@@ -324,41 +433,42 @@ export default function Home() {
     }
   }
 
-  // Probe a remote gateway by attempting a WebSocket connection
-  async function probeRemoteGateway(gw: Gateway) {
-    if (!gw.remoteHost || !gw.remotePort || !gw.remoteToken) {
-      updateGateway(gw.id, { serviceState: "error" });
-      return;
-    }
-    try {
-      const { OpenClawRpc } = await import("../lib/openclaw-rpc");
-      const probe = new OpenClawRpc();
-      await probe.connect(gw.remotePort, gw.remoteToken, gw.remoteHost);
-      probe.disconnect();
-      updateGateway(gw.id, { serviceState: "running" });
-    } catch {
-      updateGateway(gw.id, { serviceState: "error" });
-    }
-  }
+  // Use refs for polling so the interval callback doesn't depend on reactive state
+  const gatewaysRef = useRef(gateways);
+  gatewaysRef.current = gateways;
+  const activeGatewayRef = useRef(activeGateway);
+  activeGatewayRef.current = activeGateway;
+  const activeGatewayIdRef = useRef(activeGatewayId);
+  activeGatewayIdRef.current = activeGatewayId;
 
-  // Poll service health for active gateway
+  // Poll service health for active gateway — guarded and non-reactive
   const checkHealth = useCallback(async () => {
-    const rootDir = activeGateway.rootDir;
+    const gw = activeGatewayRef.current;
+    const rootDir = gw.rootDir;
     if (!rootDir) return;
+    // Skip during transition states — compose start/stop is in progress
+    if (gw.serviceState === "starting" || gw.serviceState === "stopping") return;
+    if (healthCheckBusy.current) return; // skip if previous check still running
+    healthCheckBusy.current = true;
     try {
       const { invoke } = await import("@tauri-apps/api/core");
-      await checkGatewayHealth(invoke, activeGatewayId, rootDir, activeGateway.type);
+      await checkGatewayHealth(invoke, activeGatewayIdRef.current, rootDir);
+      // Also check global browser health
+      const running = await invoke<boolean>("browser_health");
+      setBrowserRunning(running);
     } catch {
-      updateGateway(activeGatewayId, { serviceState: "error", cpuPercent: undefined, memUsageMb: undefined });
+      updateGateway(activeGatewayIdRef.current, { serviceState: "error", cpuPercent: undefined, memUsageMb: undefined });
+    } finally {
+      healthCheckBusy.current = false;
     }
-  }, [activeGateway.rootDir, activeGateway.type, activeGatewayId, updateGateway]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [updateGateway]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
-    if (!activeGateway.configured || !activeGateway.rootDir || activeGateway.type === "remote") return;
+    if (!activeGateway.configured || !activeGateway.rootDir) return;
     checkHealth();
-    const interval = setInterval(checkHealth, 10000);
+    const interval = setInterval(checkHealth, 15000);
     return () => clearInterval(interval);
-  }, [activeGateway.configured, activeGateway.rootDir, activeGateway.type, checkHealth]);
+  }, [activeGateway.configured, activeGateway.rootDir, activeGateway.id, checkHealth]);
 
   // Listen for tray gateway start/stop actions
   useEffect(() => {
@@ -371,14 +481,30 @@ export default function Home() {
         try {
           const { invoke } = await import("@tauri-apps/api/core");
           if (event.payload === "start") {
-            await invoke("compose_start", { rootDir });
-            updateGateway(activeGatewayId, { serviceState: "running" });
+            updateGateway(activeGatewayId, { serviceState: "starting", lastError: undefined, startProgress: undefined });
+            let unlistenProgress: (() => void) | undefined;
+            try {
+              // Auto-start global shared browser if not running
+              const running = await invoke<boolean>("browser_health");
+              if (!running) {
+                await invoke("browser_start", { cdpPort: BROWSER_CDP_PORT }).catch(() => {});
+                setBrowserRunning(true);
+              }
+              unlistenProgress = await listen<ComposeStartProgress>("compose-start-progress", (ev) => {
+                updateGateway(activeGatewayId, { startProgress: ev.payload });
+              });
+              await invoke("compose_start", { rootDir });
+              updateGateway(activeGatewayId, { serviceState: "running", lastError: undefined, startProgress: undefined });
+            } finally {
+              unlistenProgress?.();
+            }
           } else if (event.payload === "stop") {
+            updateGateway(activeGatewayId, { serviceState: "stopping", lastError: undefined });
             await invoke("compose_stop", { rootDir });
-            updateGateway(activeGatewayId, { serviceState: "stopped" });
+            updateGateway(activeGatewayId, { serviceState: "stopped", lastError: undefined });
           }
-        } catch {
-          updateGateway(activeGatewayId, { serviceState: "error" });
+        } catch (err) {
+          updateGateway(activeGatewayId, { serviceState: "error", lastError: String(err), startProgress: undefined });
         }
         checkHealth();
       });
@@ -386,20 +512,10 @@ export default function Home() {
     return () => { unlisten?.(); };
   }, [activeGateway.rootDir, activeGatewayId, updateGateway, checkHealth]);
 
-  function handleAddGateway(name: string, emoji: string, type: GatewayType, rootDir?: string, remote?: { host: string; port: string; token: string }) {
+  function handleAddGateway(name: string, emoji: string) {
     const id = `gw-${Date.now()}`;
-    if (type === "docker") {
-      const dir = `~/clawpond/clawking/pond/${name}`;
-      setGateways((prev) => [...prev, { id, name, emoji, type, rootDir: dir, configured: false, serviceState: "unconfigured" }]);
-    } else if (type === "remote") {
-      setGateways((prev) => [...prev, {
-        id, name, emoji, type, rootDir: null, configured: true, serviceState: "running",
-        remoteHost: remote!.host, remotePort: remote!.port, remoteToken: remote!.token,
-      }]);
-    } else {
-      // local or existing
-      setGateways((prev) => [...prev, { id, name, emoji, type, rootDir: rootDir!, configured: true, serviceState: "stopped" }]);
-    }
+    const dir = `~/clawpond/clawking/pond/${name}`;
+    setGateways((prev) => [...prev, { id, name, emoji, type: "docker", rootDir: dir, configured: false, serviceState: "unconfigured" }]);
     setActiveGatewayId(id);
     setAddGatewayModal(false);
   }
@@ -409,7 +525,7 @@ export default function Home() {
     if (!gw) return;
 
     // Stop the service first if running
-    if (gw.rootDir && gw.serviceState === "running" && gw.type !== "remote") {
+    if (gw.rootDir && gw.serviceState === "running") {
       try {
         const { invoke } = await import("@tauri-apps/api/core");
         await invoke("compose_stop", { rootDir: gw.rootDir });
@@ -417,7 +533,7 @@ export default function Home() {
     }
 
     // Delete config files if requested
-    if (deleteFiles && gw.rootDir && gw.type !== "remote") {
+    if (deleteFiles && gw.rootDir) {
       try {
         const { invoke } = await import("@tauri-apps/api/core");
         await invoke("run_shell_command", { command: `rm -rf "${gw.rootDir}"` });
@@ -428,6 +544,10 @@ export default function Home() {
     setGateways((prev) => prev.filter((g) => g.id !== gatewayId));
     if (activeGatewayId === gatewayId) {
       setActiveGatewayId("default");
+    }
+    if (securityOfficerId === gatewayId) {
+      setSecurityOfficerId(null);
+      localStorage.removeItem(SECURITY_OFFICER_STORAGE_KEY);
     }
     setDeleteConfirm(null);
   }
@@ -440,6 +560,8 @@ export default function Home() {
     serviceState: g.serviceState,
     cpuPercent: g.cpuPercent,
     memUsageMb: g.memUsageMb,
+    busy: g.busy,
+    isSecurityOfficer: g.id === securityOfficerId,
   }));
 
   // Map gateways to GatewayInfo for the RPC pool context
@@ -449,15 +571,17 @@ export default function Home() {
     emoji: g.emoji,
     serviceState: g.serviceState,
     rootDir: g.rootDir,
-    remoteHost: g.remoteHost,
-    remotePort: g.remotePort,
-    remoteToken: g.remoteToken,
+    busy: g.busy,
   }));
 
   return (
     <RpcPoolProvider gateways={gatewayInfos}>
     <div className="flex h-screen flex-col overflow-hidden bg-bg-deep font-sans">
-      <TopBar onSettings={() => { setSettingsDraft(sharedDir); setSettingsModal(true); }} />
+      <TopBar
+        onSettings={() => { setSettingsDraft(sharedDir); setSettingsModal(true); }}
+        theme={theme}
+        onToggleTheme={toggleTheme}
+      />
       <div className="flex min-h-0 flex-1">
         <Sidebar
           expanded={sidebarExpanded}
@@ -489,12 +613,13 @@ export default function Home() {
               }}
               rootDir={g.rootDir}
               serviceState={g.serviceState}
+              lastError={g.lastError}
+              startProgress={g.startProgress}
               skipDocker={!isDefault}
               fixedRootDir={!isDefault && g.rootDir ? g.rootDir : undefined}
-              remoteHost={g.remoteHost}
-              remotePort={g.remotePort}
-              remoteToken={g.remoteToken}
               sharedDir={sharedDir}
+              onBusyChange={(busy: boolean) => updateGateway(g.id, { busy })}
+              securityOfficerId={securityOfficerId ?? undefined}
             />
           );
         })}
@@ -514,17 +639,21 @@ export default function Home() {
           {/* Gateway name header */}
           <div className="px-3 py-1.5 text-[11px] font-medium text-text-ghost">
             {ctxGw.emoji} {ctxGw.name}
-            {ctxGw.type === "remote" && <span className="ml-1.5 text-text-ghost">(read-only)</span>}
           </div>
           {ctxEndpoint && (
             <div className="px-3 pb-1 text-[10px] font-mono text-text-ghost/70">
-              {ctxEndpoint}
+              API {ctxEndpoint}
+            </div>
+          )}
+          {ctxCdpEndpoint && (
+            <div className="px-3 pb-1 text-[10px] font-mono text-text-ghost/70">
+              CDP {ctxCdpEndpoint}
             </div>
           )}
           <div className="my-0.5 h-px bg-border-subtle" />
           <button
             onClick={() => ctxAction("start")}
-            disabled={ctxGw.type === "remote" || !ctxGw.configured || ctxGw.serviceState === "running"}
+            disabled={!ctxGw.configured || ctxGw.serviceState === "running" || ctxGw.serviceState === "starting" || ctxGw.serviceState === "stopping"}
             className="flex w-full items-center gap-2.5 px-3 py-2 text-left text-[12px] text-text-primary transition-colors hover:bg-bg-hover disabled:opacity-40"
           >
             <IconPlay size={14} className="shrink-0 text-accent-emerald" />
@@ -532,7 +661,7 @@ export default function Home() {
           </button>
           <button
             onClick={() => ctxAction("stop")}
-            disabled={ctxGw.type === "remote" || !ctxGw.configured || ctxGw.serviceState === "stopped" || ctxGw.serviceState === "unconfigured"}
+            disabled={!ctxGw.configured || ctxGw.serviceState === "stopped" || ctxGw.serviceState === "unconfigured" || ctxGw.serviceState === "starting" || ctxGw.serviceState === "stopping"}
             className="flex w-full items-center gap-2.5 px-3 py-2 text-left text-[12px] text-text-primary transition-colors hover:bg-bg-hover disabled:opacity-40"
           >
             <IconStop size={14} className="shrink-0 text-accent-red" />
@@ -549,7 +678,7 @@ export default function Home() {
           <div className="my-1 h-px bg-border-subtle" />
           <button
             onClick={() => ctxAction("config-model")}
-            disabled={ctxGw.type === "remote" || !ctxGw.configured}
+            disabled={!ctxGw.configured}
             className="flex w-full items-center gap-2.5 px-3 py-2 text-left text-[12px] text-text-primary transition-colors hover:bg-bg-hover disabled:opacity-40"
           >
             <IconCpu size={14} className="shrink-0 text-text-tertiary" />
@@ -557,7 +686,7 @@ export default function Home() {
           </button>
           <button
             onClick={() => ctxAction("config-channels")}
-            disabled={ctxGw.type === "remote" || !ctxGw.configured}
+            disabled={!ctxGw.configured}
             className="flex w-full items-center gap-2.5 px-3 py-2 text-left text-[12px] text-text-primary transition-colors hover:bg-bg-hover disabled:opacity-40"
           >
             <IconHash size={14} className="shrink-0 text-text-tertiary" />
@@ -565,8 +694,17 @@ export default function Home() {
           </button>
           <div className="my-1 h-px bg-border-subtle" />
           <button
+            onClick={() => ctxAction("security-officer")}
+            disabled={!ctxGw.configured || (securityOfficerId !== null && securityOfficerId !== ctxGw.id)}
+            className="flex w-full items-center gap-2.5 px-3 py-2 text-left text-[12px] text-text-primary transition-colors hover:bg-bg-hover disabled:opacity-40"
+          >
+            <IconShield size={14} className={`shrink-0 ${securityOfficerId === ctxGw.id ? "text-accent-amber" : "text-text-tertiary"}`} />
+            {securityOfficerId === ctxGw.id ? "Remove Security Officer" : "Set as Security Officer"}
+          </button>
+          <div className="my-1 h-px bg-border-subtle" />
+          <button
             onClick={() => ctxAction("reconfigure")}
-            disabled={ctxGw.type === "remote" || !ctxGw.configured}
+            disabled={!ctxGw.configured}
             className="flex w-full items-center gap-2.5 px-3 py-2 text-left text-[12px] text-text-primary transition-colors hover:bg-bg-hover disabled:opacity-40"
           >
             <IconSettings size={14} className="shrink-0 text-text-tertiary" />
@@ -627,7 +765,7 @@ export default function Home() {
       {deleteConfirm && (
         <DeleteGatewayModal
           name={deleteConfirm.name}
-          hasFiles={deleteConfirm.type !== "remote" && !!deleteConfirm.rootDir}
+          hasFiles={!!deleteConfirm.rootDir}
           onConfirm={(deleteFiles) => handleDeleteGateway(deleteConfirm.gatewayId, deleteFiles)}
           onCancel={() => setDeleteConfirm(null)}
         />
@@ -658,6 +796,19 @@ export default function Home() {
               className="mb-4 w-full rounded-lg border border-border-default bg-bg-deep px-3 py-2 text-[12px] text-text-primary placeholder:text-text-ghost focus:border-accent-blue focus:outline-none"
             />
 
+            <label className="mb-1.5 block text-[12px] font-medium text-text-secondary">
+              Shared Browser
+            </label>
+            <p className="mb-2 text-[11px] text-text-ghost">
+              All gateways share a Playwright browser container via Docker network <code className="rounded bg-bg-elevated px-1 py-0.5 font-mono text-[10px]">clawpond-shared</code>. CDP available at <code className="rounded bg-bg-elevated px-1 py-0.5 font-mono text-[10px]">127.0.0.1:{BROWSER_CDP_PORT}</code>.
+            </p>
+            <div className="mb-4 flex items-center gap-2 rounded-lg bg-bg-elevated px-3 py-2.5 ring-1 ring-border-default">
+              <span className={`inline-block h-2 w-2 rounded-full ${browserRunning ? "bg-accent-emerald" : "bg-text-ghost"}`} />
+              <span className="text-[12px] font-medium text-text-primary">
+                {browserRunning ? "Browser Running" : "Browser Stopped"}
+              </span>
+            </div>
+
             <div className="flex justify-end gap-2">
               <button
                 onClick={() => setSettingsModal(false)}
@@ -666,7 +817,7 @@ export default function Home() {
                 Cancel
               </button>
               <button
-                onClick={() => {
+                onClick={async () => {
                   setSharedDir(settingsDraft);
                   localStorage.setItem(SHARED_DIR_STORAGE_KEY, settingsDraft);
                   setSettingsModal(false);
@@ -684,47 +835,21 @@ export default function Home() {
   );
 }
 
-/* ── Add Gateway Modal (unified: type selection -> form) ── */
+/* ── Add Gateway Modal (docker only) ── */
 
 function AddGatewayModal({
   onConfirm,
   onCancel,
   existingNames,
 }: {
-  onConfirm: (name: string, emoji: string, type: GatewayType, rootDir?: string, remote?: { host: string; port: string; token: string }) => void;
+  onConfirm: (name: string, emoji: string) => void;
   onCancel: () => void;
   existingNames: string[];
 }) {
-  const [step, setStep] = useState<"type" | "form">("type");
-  const [gwType, setGwType] = useState<GatewayType>("docker");
   const [name, setName] = useState("");
   const [emoji, setEmoji] = useState("\u{1F916}");
-  const [rootDir, setRootDir] = useState("");
   const [emojiSearch, setEmojiSearch] = useState("");
   const [showAll, setShowAll] = useState(false);
-
-  // Binary check state (for local type)
-  const [binaryStatus, setBinaryStatus] = useState<"idle" | "checking" | "found" | "not_found">("idle");
-  const [installing, setInstalling] = useState(false);
-  const [installError, setInstallError] = useState<string | null>(null);
-
-  // Existing pond validation state
-  const [existingValidation, setExistingValidation] = useState<{
-    envExists: boolean | null;
-    configExists: boolean | null;
-    composeExists: boolean | null;
-    port?: string;
-    checking: boolean;
-  }>({ envExists: null, configExists: null, composeExists: null, checking: false });
-
-  // Remote connection state
-  const [remoteHost, setRemoteHost] = useState("");
-  const [remotePort, setRemotePort] = useState("18789");
-  const [remoteToken, setRemoteToken] = useState("");
-  const [showToken, setShowToken] = useState(false);
-  const [testingConnection, setTestingConnection] = useState(false);
-  const [connectionResult, setConnectionResult] = useState<"success" | "error" | null>(null);
-  const [connectionError, setConnectionError] = useState<string | null>(null);
 
   const trimmed = name.trim();
   const nameError = trimmed
@@ -735,17 +860,7 @@ function AddGatewayModal({
         : null
     : null;
 
-  const dirTrimmed = rootDir.trim();
-
-  const canConfirm = (() => {
-    if (!trimmed || nameError) return false;
-    switch (gwType) {
-      case "docker": return true;
-      case "local": return !!dirTrimmed && binaryStatus === "found";
-      case "existing": return !!dirTrimmed && existingValidation.envExists === true && existingValidation.configExists === true;
-      case "remote": return !!remoteHost.trim() && !!remotePort.trim() && !!remoteToken.trim();
-    }
-  })();
+  const canConfirm = !!trimmed && !nameError;
 
   const filtered = emojiSearch
     ? EMOJI_OPTIONS.filter((e) =>
@@ -756,281 +871,17 @@ function AddGatewayModal({
       ? EMOJI_OPTIONS
       : EMOJI_OPTIONS.slice(0, FEATURED_COUNT);
 
-  function selectType(type: GatewayType) {
-    setGwType(type);
-    setStep("form");
-    if (type === "local") {
-      checkBinary();
-    }
-  }
-
-  async function checkBinary() {
-    setBinaryStatus("checking");
-    try {
-      const { invoke } = await import("@tauri-apps/api/core");
-      const exists = await invoke<boolean>("check_binary_exists", { name: "openclaw" });
-      setBinaryStatus(exists ? "found" : "not_found");
-    } catch {
-      setBinaryStatus("not_found");
-    }
-  }
-
-  async function installBinary() {
-    setInstalling(true);
-    setInstallError(null);
-    try {
-      const { invoke } = await import("@tauri-apps/api/core");
-      await invoke("run_shell_command", { command: "npm install -g @anthropic/openclaw" });
-      await checkBinary();
-    } catch (e) {
-      setInstallError(typeof e === "string" ? e : (e as Error)?.message || "Installation failed");
-    } finally {
-      setInstalling(false);
-    }
-  }
-
-  async function pickDirectory() {
-    try {
-      const { invoke } = await import("@tauri-apps/api/core");
-      const selected = await invoke<string | null>("pick_directory");
-      if (selected) {
-        setRootDir(selected);
-        if (gwType === "existing") {
-          validateExistingDirectory(selected);
-        }
-      }
-    } catch {
-      // command not available or cancelled
-    }
-  }
-
-  async function validateExistingDirectory(dir: string) {
-    setExistingValidation({ envExists: null, configExists: null, composeExists: null, checking: true });
-    try {
-      const { invoke } = await import("@tauri-apps/api/core");
-      let envOk = false;
-      let port: string | undefined;
-      try {
-        const info = await invoke<{ port: string; token: string }>("read_gateway_info", { rootDir: dir });
-        envOk = true;
-        port = info.port;
-      } catch { /* missing */ }
-
-      let configOk = false;
-      try {
-        await invoke("read_existing_config", { rootDir: dir });
-        configOk = true;
-      } catch { /* missing */ }
-
-      // Check docker-compose.yml (optional)
-      let composeOk = false;
-      try {
-        const output = await invoke<string>("run_shell_command", { command: `test -f "${dir}/docker-compose.yml" && echo "yes" || echo "no"` });
-        composeOk = output.trim() === "yes";
-      } catch {
-        // couldn't check, leave as false
-      }
-
-      setExistingValidation({ envExists: envOk, configExists: configOk, composeExists: composeOk, port, checking: false });
-    } catch {
-      setExistingValidation({ envExists: false, configExists: false, composeExists: false, checking: false });
-    }
-  }
-
-  async function testRemoteConnection() {
-    setTestingConnection(true);
-    setConnectionResult(null);
-    setConnectionError(null);
-    try {
-      const { OpenClawRpc } = await import("../lib/openclaw-rpc");
-      const testRpc = new OpenClawRpc();
-      await testRpc.connect(remotePort.trim(), remoteToken.trim(), remoteHost.trim());
-      testRpc.disconnect();
-      setConnectionResult("success");
-    } catch (e) {
-      setConnectionResult("error");
-      setConnectionError(typeof e === "string" ? e : (e as Error)?.message || "Connection failed");
-    } finally {
-      setTestingConnection(false);
-    }
-  }
-
   function handleConfirm() {
     if (!canConfirm) return;
-    switch (gwType) {
-      case "docker":
-        onConfirm(trimmed, emoji, "docker");
-        break;
-      case "local":
-        onConfirm(trimmed, emoji, "local", dirTrimmed);
-        break;
-      case "existing":
-        onConfirm(trimmed, emoji, "existing", dirTrimmed);
-        break;
-      case "remote":
-        onConfirm(trimmed, emoji, "remote", undefined, {
-          host: remoteHost.trim(),
-          port: remotePort.trim(),
-          token: remoteToken.trim(),
-        });
-        break;
-    }
+    onConfirm(trimmed, emoji);
   }
 
-  // Step 1: Type selection
-  if (step === "type") {
-    return (
-      <div className="fixed inset-0 z-[1000] flex items-center justify-center bg-black/50 backdrop-blur-sm">
-        <div className="w-full max-w-sm rounded-xl bg-bg-surface p-5 shadow-2xl ring-1 ring-border-default">
-          <h3 className="mb-4 text-[14px] font-bold text-text-primary">Add Gateway</h3>
-          <p className="mb-4 text-[12px] text-text-tertiary">Choose how to run the gateway:</p>
-
-          <div className="flex flex-col gap-2">
-            <button
-              onClick={() => selectType("docker")}
-              className="flex items-center gap-3 rounded-lg bg-bg-elevated p-3.5 text-left ring-1 ring-border-default transition-all hover:bg-bg-hover hover:ring-accent-emerald/30"
-            >
-              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-accent-emerald/10 ring-1 ring-accent-emerald/20">
-                <IconDownload size={16} className="text-accent-emerald" />
-              </div>
-              <div className="min-w-0 flex-1">
-                <div className="text-[13px] font-semibold text-text-primary">Docker</div>
-                <div className="text-[11px] text-text-tertiary">New via Docker container (recommended)</div>
-              </div>
-              <IconArrowRight size={14} className="shrink-0 text-text-ghost" />
-            </button>
-
-            <button
-              onClick={() => selectType("local")}
-              className="flex items-center gap-3 rounded-lg bg-bg-elevated p-3.5 text-left ring-1 ring-border-default transition-all hover:bg-bg-hover hover:ring-accent-emerald/30"
-            >
-              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-accent-emerald/10 ring-1 ring-accent-emerald/20">
-                <IconSettings size={16} className="text-accent-emerald" />
-              </div>
-              <div className="min-w-0 flex-1">
-                <div className="text-[13px] font-semibold text-text-primary">Local</div>
-                <div className="text-[11px] text-text-tertiary">New via local OpenClaw binary</div>
-              </div>
-              <IconArrowRight size={14} className="shrink-0 text-text-ghost" />
-            </button>
-
-            <button
-              onClick={() => selectType("existing")}
-              className="flex items-center gap-3 rounded-lg bg-bg-elevated p-3.5 text-left ring-1 ring-border-default transition-all hover:bg-bg-hover hover:ring-accent-emerald/30"
-            >
-              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-accent-emerald/10 ring-1 ring-accent-emerald/20">
-                <IconFolder size={16} className="text-accent-emerald" />
-              </div>
-              <div className="min-w-0 flex-1">
-                <div className="text-[13px] font-semibold text-text-primary">Existing Pond</div>
-                <div className="text-[11px] text-text-tertiary">Import an existing gateway directory</div>
-              </div>
-              <IconArrowRight size={14} className="shrink-0 text-text-ghost" />
-            </button>
-
-            <button
-              onClick={() => selectType("remote")}
-              className="flex items-center gap-3 rounded-lg bg-bg-elevated p-3.5 text-left ring-1 ring-border-default transition-all hover:bg-bg-hover hover:ring-accent-emerald/30"
-            >
-              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-accent-emerald/10 ring-1 ring-accent-emerald/20">
-                <IconGlobe size={16} className="text-accent-emerald" />
-              </div>
-              <div className="min-w-0 flex-1">
-                <div className="text-[13px] font-semibold text-text-primary">Remote</div>
-                <div className="text-[11px] text-text-tertiary">Connect to a remote gateway (read-only)</div>
-              </div>
-              <IconArrowRight size={14} className="shrink-0 text-text-ghost" />
-            </button>
-          </div>
-
-          <div className="mt-4 flex justify-end">
-            <button
-              onClick={onCancel}
-              className="rounded-lg px-4 py-2 text-[12px] font-medium text-text-tertiary transition-colors hover:text-text-secondary"
-            >
-              Cancel
-            </button>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  const formTitle = {
-    docker: "Add Docker Gateway",
-    local: "Add Local Gateway",
-    existing: "Import Existing Pond",
-    remote: "Add Remote Gateway",
-  }[gwType];
-
-  // Step 2: Form
   return (
     <div className="fixed inset-0 z-[1000] flex items-center justify-center bg-black/50 backdrop-blur-sm">
       <div className="w-full max-w-sm rounded-xl bg-bg-surface p-5 shadow-2xl ring-1 ring-border-default">
-        <div className="mb-4 flex items-center gap-2">
-          <button
-            onClick={() => setStep("type")}
-            className="flex h-6 w-6 items-center justify-center rounded-md text-text-tertiary transition-colors hover:bg-bg-hover hover:text-text-secondary"
-          >
-            <IconArrowRight size={14} className="rotate-180" />
-          </button>
-          <h3 className="text-[14px] font-bold text-text-primary">
-            {formTitle}
-          </h3>
-        </div>
-
-        {/* Binary check (local only) */}
-        {gwType === "local" && (
-          <>
-          <div className="mb-3 flex items-center gap-2 rounded-lg bg-bg-elevated px-3 py-2 ring-1 ring-border-default">
-            {binaryStatus === "checking" && (
-              <>
-                <IconSpinner size={14} className="animate-spin text-text-ghost" />
-                <span className="text-[11px] text-text-tertiary">Checking openclaw binary...</span>
-              </>
-            )}
-            {binaryStatus === "found" && (
-              <>
-                <IconCheck size={14} className="text-accent-emerald" />
-                <span className="text-[11px] text-accent-emerald">openclaw binary found</span>
-              </>
-            )}
-            {binaryStatus === "not_found" && (
-              <>
-                <IconXCircle size={14} className="text-accent-red" />
-                <span className="flex-1 text-[11px] text-accent-red">openclaw binary not found in PATH</span>
-                <button
-                  onClick={checkBinary}
-                  className="text-[11px] font-medium text-text-tertiary transition-colors hover:text-text-secondary"
-                >
-                  Retry
-                </button>
-              </>
-            )}
-          </div>
-          {binaryStatus === "not_found" && (
-            <div className="mt-1.5 flex flex-col gap-1.5">
-              <button
-                onClick={installBinary}
-                disabled={installing}
-                className="flex w-full items-center justify-center gap-1.5 rounded-lg bg-accent-emerald/15 px-3 py-2 text-[12px] font-medium text-accent-emerald ring-1 ring-accent-emerald/25 transition-colors hover:bg-accent-emerald/25 disabled:opacity-50"
-              >
-                {installing ? (
-                  <>
-                    <IconSpinner size={12} className="animate-spin" />
-                    Installing openclaw...
-                  </>
-                ) : (
-                  <>Install openclaw</>
-                )}
-              </button>
-              {installError && (
-                <p className="text-[10px] text-accent-red">{installError}</p>
-              )}
-            </div>
-          )}
-          </>
-        )}
+        <h3 className="mb-4 text-[14px] font-bold text-text-primary">
+          Add Docker Gateway
+        </h3>
 
         {/* Name */}
         <label className="mb-1 block text-[11px] font-medium text-text-secondary">Name</label>
@@ -1047,178 +898,10 @@ function AddGatewayModal({
           }}
         />
         {nameError && <p className="mb-2 text-[10px] text-accent-red">{nameError}</p>}
-        {gwType === "docker" && trimmed && !nameError && (
+        {trimmed && !nameError && (
           <p className="mb-2 text-[10px] text-text-ghost">
             ~/clawpond/clawking/pond/{trimmed}
           </p>
-        )}
-
-        {/* Directory (local and existing) */}
-        {(gwType === "local" || gwType === "existing") && (
-          <>
-            <label className="mb-1 mt-2 block text-[11px] font-medium text-text-secondary">Gateway Directory</label>
-            <div className="mb-1 flex items-center gap-2">
-              <input
-                type="text"
-                value={rootDir}
-                onChange={(e) => {
-                  setRootDir(e.target.value);
-                  if (gwType === "existing") {
-                    setExistingValidation({ envExists: null, configExists: null, composeExists: null, checking: false });
-                  }
-                }}
-                placeholder="/path/to/gateway"
-                className="flex-1 rounded-lg bg-bg-elevated px-3 py-2 text-[12px] text-text-primary ring-1 ring-border-default placeholder:text-text-ghost focus:outline-none focus:ring-border-strong"
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && canConfirm) handleConfirm();
-                  if (e.key === "Escape") onCancel();
-                }}
-              />
-              <button
-                type="button"
-                onClick={pickDirectory}
-                className="flex h-[34px] w-[34px] shrink-0 items-center justify-center rounded-lg bg-bg-elevated ring-1 ring-border-default transition-colors hover:bg-bg-hover"
-                title="Browse..."
-              >
-                <IconFolder size={14} className="text-text-tertiary" />
-              </button>
-            </div>
-            {gwType === "local" && (
-              <p className="mb-2 text-[10px] text-text-ghost">
-                Point to an existing OpenClaw gateway directory
-              </p>
-            )}
-          </>
-        )}
-
-        {/* Existing pond validation */}
-        {gwType === "existing" && dirTrimmed && (
-          <div className="mb-3 flex flex-col gap-1 rounded-lg bg-bg-elevated px-3 py-2 ring-1 ring-border-default">
-            {existingValidation.checking ? (
-              <div className="flex items-center gap-2">
-                <IconSpinner size={12} className="animate-spin text-text-ghost" />
-                <span className="text-[11px] text-text-tertiary">Validating directory...</span>
-              </div>
-            ) : existingValidation.envExists === null ? (
-              <button
-                onClick={() => validateExistingDirectory(dirTrimmed)}
-                className="text-[11px] font-medium text-accent-emerald hover:underline"
-              >
-                Validate directory
-              </button>
-            ) : (
-              <>
-                <div className="flex items-center gap-2">
-                  {existingValidation.envExists ? (
-                    <IconCheck size={12} className="text-accent-emerald" />
-                  ) : (
-                    <IconXCircle size={12} className="text-accent-red" />
-                  )}
-                  <span className={`text-[11px] ${existingValidation.envExists ? "text-accent-emerald" : "text-accent-red"}`}>
-                    .env {existingValidation.envExists ? "found" : "missing"}{existingValidation.port ? ` (port ${existingValidation.port})` : ""}
-                  </span>
-                </div>
-                <div className="flex items-center gap-2">
-                  {existingValidation.configExists ? (
-                    <IconCheck size={12} className="text-accent-emerald" />
-                  ) : (
-                    <IconXCircle size={12} className="text-accent-red" />
-                  )}
-                  <span className={`text-[11px] ${existingValidation.configExists ? "text-accent-emerald" : "text-accent-red"}`}>
-                    config/openclaw.json {existingValidation.configExists ? "found" : "missing"}
-                  </span>
-                </div>
-                <div className="flex items-center gap-2">
-                  {existingValidation.composeExists ? (
-                    <IconCheck size={12} className="text-accent-emerald" />
-                  ) : (
-                    <IconX size={12} className="text-text-ghost" />
-                  )}
-                  <span className={`text-[11px] ${existingValidation.composeExists ? "text-accent-emerald" : "text-text-ghost"}`}>
-                    docker-compose.yml {existingValidation.composeExists ? "found" : "not found (optional)"}
-                  </span>
-                </div>
-              </>
-            )}
-          </div>
-        )}
-
-        {/* Remote connection fields */}
-        {gwType === "remote" && (
-          <>
-            <label className="mb-1 mt-2 block text-[11px] font-medium text-text-secondary">Host</label>
-            <input
-              type="text"
-              value={remoteHost}
-              onChange={(e) => { setRemoteHost(e.target.value); setConnectionResult(null); }}
-              placeholder="192.168.1.100"
-              className="mb-2 w-full rounded-lg bg-bg-elevated px-3 py-2 text-[12px] text-text-primary ring-1 ring-border-default placeholder:text-text-ghost focus:outline-none focus:ring-border-strong"
-            />
-
-            <label className="mb-1 block text-[11px] font-medium text-text-secondary">Port</label>
-            <input
-              type="text"
-              value={remotePort}
-              onChange={(e) => { setRemotePort(e.target.value); setConnectionResult(null); }}
-              placeholder="18789"
-              className="mb-2 w-full rounded-lg bg-bg-elevated px-3 py-2 text-[12px] text-text-primary ring-1 ring-border-default placeholder:text-text-ghost focus:outline-none focus:ring-border-strong"
-            />
-
-            <label className="mb-1 block text-[11px] font-medium text-text-secondary">Token</label>
-            <div className="mb-2 flex items-center gap-2">
-              <input
-                type={showToken ? "text" : "password"}
-                value={remoteToken}
-                onChange={(e) => { setRemoteToken(e.target.value); setConnectionResult(null); }}
-                placeholder="Gateway access token"
-                className="flex-1 rounded-lg bg-bg-elevated px-3 py-2 text-[12px] text-text-primary ring-1 ring-border-default placeholder:text-text-ghost focus:outline-none focus:ring-border-strong"
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && canConfirm) handleConfirm();
-                  if (e.key === "Escape") onCancel();
-                }}
-              />
-              <button
-                type="button"
-                onClick={() => setShowToken((v) => !v)}
-                className="flex h-[34px] w-[34px] shrink-0 items-center justify-center rounded-lg bg-bg-elevated ring-1 ring-border-default transition-colors hover:bg-bg-hover"
-                title={showToken ? "Hide token" : "Show token"}
-              >
-                <IconShield size={14} className="text-text-tertiary" />
-              </button>
-            </div>
-
-            {/* Test Connection */}
-            <button
-              type="button"
-              onClick={testRemoteConnection}
-              disabled={testingConnection || !remoteHost.trim() || !remotePort.trim() || !remoteToken.trim()}
-              className="mb-2 flex w-full items-center justify-center gap-1.5 rounded-lg bg-bg-elevated px-3 py-2 text-[12px] font-medium text-text-secondary ring-1 ring-border-default transition-colors hover:bg-bg-hover disabled:opacity-40"
-            >
-              {testingConnection ? (
-                <>
-                  <IconSpinner size={12} className="animate-spin" />
-                  Testing...
-                </>
-              ) : (
-                <>
-                  <IconGlobe size={12} />
-                  Test Connection
-                </>
-              )}
-            </button>
-            {connectionResult === "success" && (
-              <div className="mb-2 flex items-center gap-2 rounded-lg bg-accent-emerald/10 px-3 py-1.5 ring-1 ring-accent-emerald/20">
-                <IconCheck size={12} className="text-accent-emerald" />
-                <span className="text-[11px] text-accent-emerald">Connection successful</span>
-              </div>
-            )}
-            {connectionResult === "error" && (
-              <div className="mb-2 flex items-center gap-2 rounded-lg bg-accent-red/10 px-3 py-1.5 ring-1 ring-accent-red/20">
-                <IconXCircle size={12} className="text-accent-red" />
-                <span className="text-[11px] text-accent-red">{connectionError || "Connection failed"}</span>
-              </div>
-            )}
-          </>
         )}
 
         {/* Icon picker */}
@@ -1279,7 +962,7 @@ function AddGatewayModal({
             className="inline-flex items-center gap-1.5 rounded-lg bg-accent-emerald/15 px-4 py-2 text-[12px] font-semibold text-accent-emerald ring-1 ring-accent-emerald/25 transition-all hover:bg-accent-emerald/25 disabled:opacity-40"
           >
             <IconPlus size={13} />
-            {gwType === "existing" ? "Import" : gwType === "remote" ? "Connect" : "Create"}
+            Create
           </button>
         </div>
       </div>

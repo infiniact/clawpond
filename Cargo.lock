@@ -622,6 +622,7 @@ dependencies = [
 name = "claw-ui-bridge"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "claw-export",
  "claw-spawner",
  "claw-updater",
