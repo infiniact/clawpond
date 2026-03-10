@@ -919,6 +919,9 @@ export function ConfigWizard({ onComplete, onClose, skipDocker, fixedRootDir, sh
                   {!dockerStatus.checking && (!dockerStatus.docker || !dockerStatus.compose) && (
                     <DockerInstallHint dockerMissing={!dockerStatus.docker} composeMissing={!dockerStatus.compose} />
                   )}
+                  {!dockerStatus.checking && dockerStatus.docker && dockerStatus.compose && (
+                    <WindowsHostNetworkHint />
+                  )}
                   {!dockerStatus.checking && (
                     <button onClick={checkDocker} className="mt-1 text-[11px] font-medium text-accent-emerald hover:underline">
                       Re-check
@@ -1677,6 +1680,35 @@ function EnvRow({
   );
 }
 
+function WindowsHostNetworkHint() {
+  const [platform, setPlatform] = useState<string | null>(null);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const p = await invoke<string>("detect_platform");
+        setPlatform(p);
+      } catch {
+        setPlatform(detectOS());
+      }
+    })();
+  }, []);
+
+  if (platform !== "windows") return null;
+
+  return (
+    <div className="mt-2 rounded-md bg-bg-elevated px-3 py-2 ring-1 ring-border-default">
+      <p className="text-[11px] font-medium text-accent-amber">
+        Important: Enable host networking in Docker Desktop
+      </p>
+      <p className="mt-1 text-[10px] leading-relaxed text-text-ghost">
+        Open Docker Desktop → Settings → Resources → Network → check &quot;Enable host networking&quot;, then click &quot;Apply &amp; restart&quot;. This is required for the gateway container to communicate with the host.
+      </p>
+    </div>
+  );
+}
+
 function DockerInstallHint({ dockerMissing, composeMissing }: { dockerMissing: boolean; composeMissing: boolean }) {
   const [platform, setPlatform] = useState<string | null>(null);
 
@@ -1707,6 +1739,14 @@ function DockerInstallHint({ dockerMissing, composeMissing }: { dockerMissing: b
           />
           <p className="text-[10px] text-text-ghost">
             Docker Desktop includes both Docker Engine and Docker Compose. After installation, launch Docker Desktop and ensure it is running.
+          </p>
+        </div>
+        <div className="rounded-md bg-bg-elevated px-3 py-2 ring-1 ring-border-default">
+          <p className="text-[11px] font-medium text-accent-amber">
+            Important: Enable host networking in Docker Desktop
+          </p>
+          <p className="mt-1 text-[10px] leading-relaxed text-text-ghost">
+            Open Docker Desktop → Settings → Resources → Network → check &quot;Enable host networking&quot;, then click &quot;Apply &amp; restart&quot;. This is required for the gateway container to communicate with the host.
           </p>
         </div>
       </div>

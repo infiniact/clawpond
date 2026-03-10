@@ -1,28 +1,85 @@
 "use client";
 
+import { useCallback } from "react";
 import Image from "next/image";
 import { IconSettings, IconSun, IconMoon } from "./icons";
 
+function WindowControls() {
+  const handleMinimize = useCallback(async () => {
+    const { getCurrentWindow } = await import("@tauri-apps/api/window");
+    getCurrentWindow().minimize();
+  }, []);
+
+  const handleMaximize = useCallback(async () => {
+    const win = (await import("@tauri-apps/api/window")).getCurrentWindow();
+    const maximized = await win.isMaximized();
+    if (maximized) win.unmaximize(); else win.maximize();
+  }, []);
+
+  const handleClose = useCallback(async () => {
+    const { getCurrentWindow } = await import("@tauri-apps/api/window");
+    getCurrentWindow().close();
+  }, []);
+
+  return (
+    <div className="flex items-center">
+      {/* Minimize */}
+      <button
+        onClick={handleMinimize}
+        className="flex h-11 w-11 items-center justify-center text-text-tertiary transition-colors hover:bg-bg-hover hover:text-text-secondary"
+        title="Minimize"
+      >
+        <svg width="10" height="1" viewBox="0 0 10 1">
+          <rect width="10" height="1" fill="currentColor" />
+        </svg>
+      </button>
+      {/* Maximize / Restore */}
+      <button
+        onClick={handleMaximize}
+        className="flex h-11 w-11 items-center justify-center text-text-tertiary transition-colors hover:bg-bg-hover hover:text-text-secondary"
+        title="Maximize"
+      >
+        <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
+          <rect x="0.5" y="0.5" width="9" height="9" stroke="currentColor" strokeWidth="1" />
+        </svg>
+      </button>
+      {/* Close */}
+      <button
+        onClick={handleClose}
+        className="flex h-11 w-11 items-center justify-center text-text-tertiary transition-colors hover:bg-[#e81123] hover:text-white"
+        title="Close"
+      >
+        <svg width="10" height="10" viewBox="0 0 10 10">
+          <path d="M1 1L9 9M9 1L1 9" stroke="currentColor" strokeWidth="1.2" />
+        </svg>
+      </button>
+    </div>
+  );
+}
+
 export function TopBar({ onSettings, theme, onToggleTheme }: { onSettings?: () => void; theme?: "dark" | "light"; onToggleTheme?: () => void }) {
   return (
-    <header className="flex h-11 shrink-0 items-center justify-between border-b border-border-subtle bg-bg-deep px-4">
+    <header className="flex h-11 shrink-0 items-center border-b border-border-subtle bg-bg-deep">
       {/* Left: branding */}
-      <div className="flex items-center gap-2.5">
+      <div className="flex items-center gap-2.5 px-4" data-tauri-drag-region="">
         <Image
           src={theme === "light" ? "/logo-light.svg" : "/logo-dark.svg"}
           alt="ClawPond"
           width={24}
           height={24}
-          className="shrink-0 rounded-[22.37%]"
+          className="shrink-0 rounded-[22.37%] pointer-events-none"
           priority
         />
-        <span className="text-[13px] font-semibold tracking-tight text-text-primary">
+        <span className="text-[13px] font-semibold tracking-tight text-text-primary select-none">
           ClawPond
         </span>
       </div>
 
-      {/* Right: theme toggle + settings */}
-      <div className="flex items-center gap-2">
+      {/* Center: drag region (fills remaining space) */}
+      <div className="flex-1 h-full" data-tauri-drag-region="" />
+
+      {/* Right: theme toggle + settings + window controls */}
+      <div className="flex items-center gap-2 px-2">
         {onToggleTheme && (
           <button
             onClick={onToggleTheme}
@@ -46,6 +103,7 @@ export function TopBar({ onSettings, theme, onToggleTheme }: { onSettings?: () =
           </button>
         )}
       </div>
+      <WindowControls />
     </header>
   );
 }
