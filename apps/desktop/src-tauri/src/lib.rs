@@ -124,6 +124,7 @@ fn fix_path_env() {
 }
 
 #[tauri::command]
+#[allow(dead_code)]
 async fn remove_directory(path: String) -> Result<(), String> {
     let expanded = shellexpand::tilde(&path).to_string();
     std::fs::remove_dir_all(&expanded).map_err(|e| e.to_string())
@@ -226,6 +227,10 @@ pub fn run() {
             claw_ui_bridge::copy_to_workspace,
             claw_ui_bridge::save_base64_to_workspace,
             claw_ui_bridge::list_workspace_agents,
+            claw_ui_bridge::add_workspace_agent,
+            claw_ui_bridge::toggle_agent_allowed,
+            claw_ui_bridge::read_scheduled_tasks,
+            claw_ui_bridge::write_scheduled_tasks,
         ])
         .setup(|app| {
             if cfg!(debug_assertions) {

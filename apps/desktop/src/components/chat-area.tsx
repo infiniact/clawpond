@@ -120,8 +120,10 @@ export function ChatArea({
   startProgress,
   securityOfficerId,
   agents,
+  allowedAgents,
   agentIcons,
   onAgentIconChange,
+  onRefreshAgents,
 }: {
   hidden?: boolean;
   onToggleTaskPanel: () => void;
@@ -143,38 +145,83 @@ export function ChatArea({
   startProgress?: ComposeStartProgress;
   securityOfficerId?: string;
   agents?: string[];
+  allowedAgents?: string[];
   agentIcons?: Record<string, string>;
   onAgentIconChange?: (agentName: string, emoji: string) => void;
+  onRefreshAgents?: () => void;
 }) {
   const showWizard = !configured || reconfiguring;
   const showChat = configured && !reconfiguring;
+
+  // Track which agents are currently running (reported by ChatView via RPC events)
+  const [runningAgents, setRunningAgents] = useState<Set<string>>(new Set());
+  // Track agents discovered from messages but not in the workspace list
+  const [discoveredAgents, setDiscoveredAgents] = useState<Set<string>>(new Set());
+  const allAgents = agents && agents.length > 0
+    ? [...new Set([...agents, ...discoveredAgents])]
+    : [...discoveredAgents];
 
   // Emoji picker state for agent icon editing
   const [emojiPicker, setEmojiPicker] = useState<{ agentName: string; x: number; y: number } | null>(null);
   const [emojiSearch, setEmojiSearch] = useState("");
   const [emojiShowAll, setEmojiShowAll] = useState(false);
   const emojiPickerRef = useRef<HTMLDivElement>(null);
+  // Agent context menu state (shown on double-click)
+  const [agentMenu, setAgentMenu] = useState<{ agentName: string; x: number; y: number } | null>(null);
+  const agentMenuRef = useRef<HTMLDivElement>(null);
 
-  // Close emoji picker on click outside
+  // Close emoji picker or agent menu on click outside
   useEffect(() => {
-    if (!emojiPicker) return;
+    if (!emojiPicker && !agentMenu) return;
     const handler = (e: MouseEvent) => {
-      if (emojiPickerRef.current && !emojiPickerRef.current.contains(e.target as Node)) {
+      if (emojiPicker && emojiPickerRef.current && !emojiPickerRef.current.contains(e.target as Node)) {
         setEmojiPicker(null);
         setEmojiSearch("");
         setEmojiShowAll(false);
       }
+      if (agentMenu && agentMenuRef.current && !agentMenuRef.current.contains(e.target as Node)) {
+        setAgentMenu(null);
+      }
     };
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
-  }, [emojiPicker]);
+  }, [emojiPicker, agentMenu]);
 
   const handleAgentDoubleClick = useCallback((agentName: string, e: React.MouseEvent) => {
     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-    setEmojiPicker({ agentName, x: rect.left, y: rect.bottom + 4 });
-    setEmojiSearch("");
-    setEmojiShowAll(false);
+    setAgentMenu({ agentName, x: rect.left, y: rect.bottom + 4 });
   }, []);
+
+  const handleAgentMenuAction = useCallback(async (action: "icon" | "add" | "allow" | "disallow") => {
+    if (!agentMenu) return;
+    if (action === "icon") {
+      setEmojiPicker({ agentName: agentMenu.agentName, x: agentMenu.x, y: agentMenu.y + 32 });
+      setEmojiSearch("");
+      setEmojiShowAll(false);
+    } else if (action === "add" && rootDir) {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        await invoke("add_workspace_agent", { rootDir, agentName: agentMenu.agentName });
+        setDiscoveredAgents((prev) => {
+          const next = new Set(prev);
+          next.delete(agentMenu.agentName);
+          return next;
+        });
+        onRefreshAgents?.();
+      } catch (err) {
+        console.error("Failed to add workspace agent:", err);
+      }
+    } else if ((action === "allow" || action === "disallow") && rootDir) {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        await invoke("toggle_agent_allowed", { rootDir, agentName: agentMenu.agentName, allow: action === "allow" });
+        onRefreshAgents?.();
+      } catch (err) {
+        console.error("Failed to toggle agent allowed:", err);
+      }
+    }
+    setAgentMenu(null);
+  }, [agentMenu, rootDir, onRefreshAgents]);
 
   const handleEmojiSelect = useCallback((emoji: string) => {
     if (emojiPicker && onAgentIconChange) {
@@ -195,18 +242,31 @@ export function ChatArea({
       <div className="relative z-10 flex h-10 shrink-0 items-center justify-between overflow-visible border-b border-border-subtle px-3">
         {/* Agent bar */}
         <div className="flex items-center gap-1.5 overflow-x-auto">
-          {agents && agents.length > 0 && agents.map((agent) => {
+          {allAgents.length > 0 && allAgents.map((agent) => {
             const iconKey = `${gatewayId}:${agent}`;
             const icon = agentIcons?.[iconKey] || "🤖";
+            const isRunning = runningAgents.has(agent);
+            const isInList = agents?.includes(agent);
+            const isAllowed = allowedAgents?.includes(agent);
             return (
               <button
                 key={agent}
-                className="flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] font-medium text-text-secondary transition-colors hover:bg-bg-hover ring-1 ring-border-subtle"
-                title={`Agent: ${agent} (double-click to change icon)`}
+                className={`relative flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] font-medium transition-colors hover:bg-bg-hover ring-1 ${isInList ? "text-text-secondary ring-border-subtle" : "text-text-ghost ring-border-subtle/50 ring-dashed"}`}
+                title={`Agent: ${agent}${isRunning ? " (running)" : ""}${isInList ? (isAllowed ? " (allowed)" : " (disabled)") : " (not in workspace)"}`}
                 onDoubleClick={(e) => handleAgentDoubleClick(agent, e)}
+                onContextMenu={(e) => { e.preventDefault(); handleAgentDoubleClick(agent, e); }}
               >
-                <span className="text-[13px] leading-none">{icon}</span>
+                <span className="relative text-[13px] leading-none">
+                  {icon}
+                  <span className={`absolute -right-0.5 -top-0.5 block h-[5px] w-[5px] rounded-full ring-1 ring-bg-base ${isRunning ? "bg-accent-emerald" : isInList && isAllowed ? "bg-text-ghost" : "bg-text-ghost/40"}`} />
+                </span>
                 <span className="max-w-[80px] truncate">{agent}</span>
+                {isRunning && (
+                  <svg className="ml-0.5 h-[10px] w-[10px] animate-spin text-accent-emerald" viewBox="0 0 16 16" fill="none">
+                    <circle cx="8" cy="8" r="6" stroke="currentColor" strokeWidth="2" strokeOpacity="0.25" />
+                    <path d="M14 8a6 6 0 0 0-6-6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+                  </svg>
+                )}
               </button>
             );
           })}
@@ -224,6 +284,54 @@ export function ChatArea({
           <IconChevronRight size={14} className={taskPanelOpen ? "" : "rotate-180"} />
         </button>
       </div>
+
+      {/* Agent context menu (right-click / double-click) */}
+      {agentMenu && (() => {
+        const menuIsInList = agents?.includes(agentMenu.agentName);
+        const menuIsAllowed = allowedAgents?.includes(agentMenu.agentName);
+        return (
+          <div
+            ref={agentMenuRef}
+            className="fixed z-[999] w-[180px] rounded-lg bg-bg-surface py-1 shadow-xl ring-1 ring-border-default"
+            style={{ left: agentMenu.x, top: agentMenu.y }}
+          >
+            <button
+              onClick={() => handleAgentMenuAction("icon")}
+              className="flex w-full items-center gap-2 px-3 py-1.5 text-[11px] text-text-secondary transition-colors hover:bg-bg-hover"
+            >
+              <span className="text-[13px]">🎨</span>
+              Change Icon
+            </button>
+            {!menuIsInList && (
+              <button
+                onClick={() => handleAgentMenuAction("add")}
+                className="flex w-full items-center gap-2 px-3 py-1.5 text-[11px] text-accent-emerald transition-colors hover:bg-bg-hover"
+              >
+                <span className="text-[13px] leading-none">+</span>
+                Add to Workspace
+              </button>
+            )}
+            {menuIsInList && menuIsAllowed && (
+              <button
+                onClick={() => handleAgentMenuAction("disallow")}
+                className="flex w-full items-center gap-2 px-3 py-1.5 text-[11px] text-text-ghost transition-colors hover:bg-bg-hover"
+              >
+                <span className="text-[13px] leading-none">−</span>
+                Disallow Agent
+              </button>
+            )}
+            {menuIsInList && !menuIsAllowed && (
+              <button
+                onClick={() => handleAgentMenuAction("allow")}
+                className="flex w-full items-center gap-2 px-3 py-1.5 text-[11px] text-accent-emerald transition-colors hover:bg-bg-hover"
+              >
+                <span className="text-[13px] leading-none">+</span>
+                Allow Agent
+              </button>
+            )}
+          </div>
+        );
+      })()}
 
       {/* Emoji picker popup for agent icons */}
       {emojiPicker && (
@@ -275,7 +383,7 @@ export function ChatArea({
       </div>
       {configured && (
         <div className={`flex min-h-0 flex-1 flex-col ${showChat ? "" : "hidden"}`}>
-          <ChatView rootDir={rootDir} serviceState={serviceState} lastError={lastError} startProgress={startProgress} hidden={hidden} gatewayId={gatewayId} gatewayName={gatewayName} gatewayEmoji={gatewayEmoji} onBusyChange={onBusyChange} securityOfficerId={securityOfficerId} agents={agents} agentIcons={agentIcons} />
+          <ChatView rootDir={rootDir} serviceState={serviceState} lastError={lastError} startProgress={startProgress} hidden={hidden} gatewayId={gatewayId} gatewayName={gatewayName} gatewayEmoji={gatewayEmoji} onBusyChange={onBusyChange} securityOfficerId={securityOfficerId} agents={agents} agentIcons={agentIcons} onRunningAgentsChange={setRunningAgents} onDiscoveredAgentsChange={setDiscoveredAgents} />
         </div>
       )}
     </div>
@@ -308,7 +416,7 @@ function fromStored(msg: StoredMessage): Message {
   };
 }
 
-function ChatView({ rootDir, serviceState, lastError, startProgress, hidden, gatewayId, gatewayName, gatewayEmoji, onBusyChange, securityOfficerId, agents, agentIcons }: { rootDir: string | null; serviceState: string; lastError?: string; startProgress?: ComposeStartProgress; hidden?: boolean; gatewayId: string; gatewayName: string; gatewayEmoji: string; onBusyChange?: (busy: boolean) => void; securityOfficerId?: string; agents?: string[]; agentIcons?: Record<string, string> }) {
+function ChatView({ rootDir, serviceState, lastError, startProgress, hidden, gatewayId, gatewayName, gatewayEmoji, onBusyChange, securityOfficerId, agents, agentIcons, onRunningAgentsChange, onDiscoveredAgentsChange }: { rootDir: string | null; serviceState: string; lastError?: string; startProgress?: ComposeStartProgress; hidden?: boolean; gatewayId: string; gatewayName: string; gatewayEmoji: string; onBusyChange?: (busy: boolean) => void; securityOfficerId?: string; agents?: string[]; agentIcons?: Record<string, string>; onRunningAgentsChange?: (agents: Set<string>) => void; onDiscoveredAgentsChange?: (agents: Set<string>) => void }) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [connected, setConnected] = useState(false);
@@ -324,6 +432,36 @@ function ChatView({ rootDir, serviceState, lastError, startProgress, hidden, gat
   useEffect(() => {
     onBusyChangeRef.current?.(sending);
   }, [sending]);
+
+  // Track running subagents and propagate to parent
+  const runningAgentsRef = useRef<Set<string>>(new Set());
+  const onRunningAgentsChangeRef = useRef(onRunningAgentsChange);
+  onRunningAgentsChangeRef.current = onRunningAgentsChange;
+  const markAgentRunning = useCallback((agentName: string) => {
+    if (!runningAgentsRef.current.has(agentName)) {
+      runningAgentsRef.current = new Set(runningAgentsRef.current).add(agentName);
+      onRunningAgentsChangeRef.current?.(runningAgentsRef.current);
+    }
+  }, []);
+  const markAgentStopped = useCallback((agentName: string) => {
+    if (runningAgentsRef.current.has(agentName)) {
+      const next = new Set(runningAgentsRef.current);
+      next.delete(agentName);
+      runningAgentsRef.current = next;
+      onRunningAgentsChangeRef.current?.(next);
+    }
+  }, []);
+
+  // Track discovered agents from RPC events and propagate to parent
+  const discoveredAgentsRef = useRef<Set<string>>(new Set());
+  const onDiscoveredAgentsChangeRef = useRef(onDiscoveredAgentsChange);
+  onDiscoveredAgentsChangeRef.current = onDiscoveredAgentsChange;
+  const markAgentDiscovered = useCallback((agentName: string) => {
+    if (!discoveredAgentsRef.current.has(agentName)) {
+      discoveredAgentsRef.current = new Set(discoveredAgentsRef.current).add(agentName);
+      onDiscoveredAgentsChangeRef.current?.(discoveredAgentsRef.current);
+    }
+  }, []);
 
   const [thinkingElapsed, setThinkingElapsed] = useState(0);
   const [timedOut, setTimedOut] = useState(false);
@@ -517,6 +655,8 @@ function ChatView({ rootDir, serviceState, lastError, startProgress, hidden, gat
   // Scroll to bottom after messages are rendered on initial load
   useEffect(() => {
     if (!needsInitialScroll.current || messages.length === 0) return;
+    // If hidden, don't consume the flag — wait until we become visible
+    if (hidden) return;
     needsInitialScroll.current = false;
     // Use double rAF to ensure React has committed the DOM updates
     requestAnimationFrame(() => {
@@ -524,7 +664,7 @@ function ChatView({ rootDir, serviceState, lastError, startProgress, hidden, gat
         scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "instant" });
       });
     });
-  }, [messages]);
+  }, [messages, hidden]);
 
   // Persist messages on change (debounced)
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -720,6 +860,11 @@ function ChatView({ rootDir, serviceState, lastError, startProgress, hidden, gat
     const unsub = rpc.onDisconnect((reason) => {
       setConnected(false);
       setSending(false);
+      // Clear running agents on disconnect
+      if (runningAgentsRef.current.size > 0) {
+        runningAgentsRef.current = new Set();
+        onRunningAgentsChangeRef.current?.(runningAgentsRef.current);
+      }
       if (serviceState === "running") {
         // Enter restart grace period — show "restarting" instead of error
         enterRestartGrace();
@@ -775,6 +920,10 @@ function ChatView({ rootDir, serviceState, lastError, startProgress, hidden, gat
           // Try to extract agent name from event payload
           const eventAgent = event.payload?.agent || event.payload?.agentId || event.payload?.workspace || event.payload?.data?.agent || event.payload?.data?.workspace;
           const resolvedAgent: string | undefined = typeof eventAgent === "string" && eventAgent ? eventAgent : undefined;
+          if (resolvedAgent) {
+            markAgentRunning(resolvedAgent);
+            markAgentDiscovered(resolvedAgent);
+          }
           if (!streamMsgId.current) {
             streamMsgId.current = msgId;
             streamSource.current = "agent";
@@ -835,6 +984,9 @@ function ChatView({ rootDir, serviceState, lastError, startProgress, hidden, gat
       if (event.type === "agent" && event.payload?.stream === "lifecycle") {
         if (event.payload?.data?.phase === "end" || event.payload?.data?.phase === "error") {
           console.log("[chat] >>> AGENT LIFECYCLE END | streamMsgId:", streamMsgId.current);
+          // Mark agent as stopped
+          const lifecycleAgent = event.payload?.agent || event.payload?.agentId || event.payload?.workspace || event.payload?.data?.agent || event.payload?.data?.workspace;
+          if (typeof lifecycleAgent === "string" && lifecycleAgent) markAgentStopped(lifecycleAgent);
           const msgId = streamMsgId.current;
           if (msgId) {
             setMessages((prev) => prev.map((m) =>

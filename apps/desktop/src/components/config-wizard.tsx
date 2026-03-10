@@ -21,7 +21,6 @@ import {
   IconSpinner,
   IconXCircle,
   IconClipboard,
-  IconLock,
   IconSettings,
   IconPlay,
   IconCpu,
@@ -41,8 +40,6 @@ const STEPS = [
 ] as const;
 
 const PLAYWRIGHT_IMAGE = "mcr.microsoft.com/playwright:v1.52.0-noble";
-
-type StepId = (typeof STEPS)[number]["id"];
 
 export type Provider = {
   id: string;
@@ -341,7 +338,7 @@ export function ConfigWizard({ onComplete, onClose, skipDocker, fixedRootDir, sh
         // Detection failed — keep defaults
       }
     })();
-  }, []);
+  }, [fixedRootDir]);
 
   // Check if Docker images already exist locally
   useEffect(() => {

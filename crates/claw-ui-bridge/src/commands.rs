@@ -606,23 +606,233 @@ pub fn save_base64_to_workspace(
     Ok(format!("/home/node/.openclaw/workspace/tmp/{}", filename))
 }
 
-/// Scan `{rootDir}/config/` for files named `workspace-<agent>` and return the agent names.
+/// Resolve the OPENCLAW_WORKSPACE_DIR from the .env file in root_dir.
+fn resolve_workspace_dir(root_dir: &str) -> Result<std::path::PathBuf, String> {
+    let expanded = shellexpand::tilde(root_dir).to_string();
+    let env_path = std::path::Path::new(&expanded).join(".env");
+    let content = std::fs::read_to_string(&env_path)
+        .map_err(|e| format!("Failed to read .env: {}", e))?;
+
+    let mut workspace_dir = None;
+    for line in content.lines() {
+        let line = line.trim();
+        if let Some(val) = line.strip_prefix("OPENCLAW_WORKSPACE_DIR=") {
+            workspace_dir = Some(val.to_string());
+        }
+    }
+
+    let dir = workspace_dir.ok_or_else(|| "OPENCLAW_WORKSPACE_DIR not found in .env".to_string())?;
+    let dir_expanded = shellexpand::tilde(&dir).to_string();
+    Ok(std::path::PathBuf::from(dir_expanded))
+}
+
+/// Read scheduled tasks from {workspace}/memory/heartbeat-state.json.
 #[tauri::command]
-pub fn list_workspace_agents(root_dir: String) -> Result<Vec<String>, String> {
+pub fn read_scheduled_tasks(root_dir: String) -> Result<serde_json::Value, String> {
+    let workspace = resolve_workspace_dir(&root_dir)?;
+    let path = workspace.join("memory/heartbeat-state.json");
+
+    if !path.exists() {
+        return Ok(serde_json::json!({
+            "lastChecks": {},
+            "cronJobs": {}
+        }));
+    }
+
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| format!("Failed to read heartbeat-state.json: {}", e))?;
+    serde_json::from_str(&content)
+        .map_err(|e| format!("Failed to parse heartbeat-state.json: {}", e))
+}
+
+/// Write scheduled tasks to {workspace}/memory/heartbeat-state.json.
+#[tauri::command]
+pub fn write_scheduled_tasks(root_dir: String, state: serde_json::Value) -> Result<(), String> {
+    let workspace = resolve_workspace_dir(&root_dir)?;
+    let memory_dir = workspace.join("memory");
+    std::fs::create_dir_all(&memory_dir)
+        .map_err(|e| format!("Failed to create memory directory: {}", e))?;
+
+    let path = memory_dir.join("heartbeat-state.json");
+    let content = serde_json::to_string_pretty(&state)
+        .map_err(|e| format!("Failed to serialize state: {}", e))?;
+    std::fs::write(&path, content)
+        .map_err(|e| format!("Failed to write heartbeat-state.json: {}", e))
+}
+
+/// Read agents from `openclaw.json`: both `agents.list[]` (excluding "main")
+/// and the main agent's `subagents.allowAgents[]`.
+#[tauri::command]
+pub fn list_workspace_agents(root_dir: String) -> Result<WorkspaceAgentsInfo, String> {
     let expanded = shellexpand::tilde(&root_dir).to_string();
-    let config_dir = std::path::Path::new(&expanded).join("config");
+    let config_path = std::path::Path::new(&expanded).join("config/openclaw.json");
+    let content = match std::fs::read_to_string(&config_path) {
+        Ok(c) => c,
+        Err(_) => return Ok(WorkspaceAgentsInfo { agents: Vec::new(), allowed: Vec::new() }),
+    };
+    let json: serde_json::Value =
+        serde_json::from_str(&content).map_err(|e| format!("Failed to parse openclaw.json: {}", e))?;
+
     let mut agents = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(&config_dir) {
-        for entry in entries.flatten() {
-            if let Some(name) = entry.file_name().to_str() {
-                if let Some(agent) = name.strip_prefix("workspace-") {
-                    if !agent.is_empty() {
-                        agents.push(agent.to_string());
+    let mut allowed = Vec::new();
+
+    if let Some(list) = json.pointer("/agents/list").and_then(|v| v.as_array()) {
+        for entry in list {
+            if let Some(id) = entry.get("id").and_then(|v| v.as_str()) {
+                if id == "main" {
+                    // Extract allowAgents from the main entry
+                    if let Some(allow) = entry.pointer("/subagents/allowAgents").and_then(|v| v.as_array()) {
+                        for a in allow {
+                            if let Some(s) = a.as_str() {
+                                allowed.push(s.to_string());
+                            }
+                        }
                     }
+                } else {
+                    agents.push(id.to_string());
                 }
             }
         }
     }
     agents.sort();
-    Ok(agents)
+    allowed.sort();
+    Ok(WorkspaceAgentsInfo { agents, allowed })
+}
+
+#[derive(Serialize)]
+pub struct WorkspaceAgentsInfo {
+    pub agents: Vec<String>,
+    pub allowed: Vec<String>,
+}
+
+/// Toggle an agent in/out of the main agent's `subagents.allowAgents[]` in `openclaw.json`.
+#[tauri::command]
+pub fn toggle_agent_allowed(root_dir: String, agent_name: String, allow: bool) -> Result<(), String> {
+    let expanded = shellexpand::tilde(&root_dir).to_string();
+    let config_path = std::path::Path::new(&expanded).join("config/openclaw.json");
+    let content = std::fs::read_to_string(&config_path)
+        .map_err(|e| format!("Failed to read openclaw.json: {}", e))?;
+    let mut json: serde_json::Value =
+        serde_json::from_str(&content).map_err(|e| format!("Failed to parse openclaw.json: {}", e))?;
+
+    // Find the main agent index
+    let main_idx = json.pointer("/agents/list")
+        .and_then(|v| v.as_array())
+        .and_then(|list| list.iter().position(|e| e.get("id").and_then(|v| v.as_str()) == Some("main")))
+        .ok_or_else(|| "main agent not found in agents.list".to_string())?;
+
+    let path = format!("/agents/list/{}/subagents/allowAgents", main_idx);
+
+    if allow {
+        // Add to allowAgents
+        if let Some(arr) = json.pointer_mut(&path).and_then(|v| v.as_array_mut()) {
+            let name_val = serde_json::Value::String(agent_name.clone());
+            if !arr.contains(&name_val) {
+                arr.push(name_val);
+            }
+        } else {
+            // Create subagents.allowAgents
+            if let Some(main_entry) = json
+                .pointer_mut(&format!("/agents/list/{}", main_idx))
+                .and_then(|v| v.as_object_mut())
+            {
+                let subagents = main_entry
+                    .entry("subagents")
+                    .or_insert_with(|| serde_json::json!({}));
+                if let Some(obj) = subagents.as_object_mut() {
+                    obj.insert("allowAgents".to_string(), serde_json::json!([agent_name]));
+                }
+            }
+        }
+    } else {
+        // Remove from allowAgents
+        if let Some(arr) = json.pointer_mut(&path).and_then(|v| v.as_array_mut()) {
+            arr.retain(|v| v.as_str() != Some(&agent_name));
+        }
+    }
+
+    let output = serde_json::to_string_pretty(&json)
+        .map_err(|e| format!("Failed to serialize openclaw.json: {}", e))?;
+    std::fs::write(&config_path, output.as_bytes())
+        .map_err(|e| format!("Failed to write openclaw.json: {}", e))?;
+    Ok(())
+}
+
+/// Add an agent to `openclaw.json` `agents.list[]` and to the main agent's
+/// `subagents.allowAgents[]`. Uses defaults from `agents.defaults` for model.
+#[tauri::command]
+pub fn add_workspace_agent(root_dir: String, agent_name: String) -> Result<(), String> {
+    let expanded = shellexpand::tilde(&root_dir).to_string();
+    let config_path = std::path::Path::new(&expanded).join("config/openclaw.json");
+    let content = std::fs::read_to_string(&config_path)
+        .map_err(|e| format!("Failed to read openclaw.json: {}", e))?;
+    let mut json: serde_json::Value =
+        serde_json::from_str(&content).map_err(|e| format!("Failed to parse openclaw.json: {}", e))?;
+
+    // Check if agent already exists in list
+    if let Some(list) = json.pointer("/agents/list").and_then(|v| v.as_array()) {
+        if list.iter().any(|e| e.get("id").and_then(|v| v.as_str()) == Some(&agent_name)) {
+            return Ok(()); // Already exists
+        }
+    }
+
+    // Read default model from agents.defaults.model.primary
+    let default_model = json
+        .pointer("/agents/defaults/model/primary")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    // Build the new agent entry
+    let new_agent = serde_json::json!({
+        "id": agent_name,
+        "name": agent_name,
+        "workspace": format!("/home/node/.openclaw/workspace-{}", agent_name),
+        "agentDir": format!("/home/node/.openclaw/agents/{}/agent", agent_name),
+        "model": default_model,
+    });
+
+    // Append to agents.list
+    if let Some(list) = json.pointer_mut("/agents/list").and_then(|v| v.as_array_mut()) {
+        list.push(new_agent);
+    } else {
+        return Err("agents.list not found in openclaw.json".to_string());
+    }
+
+    // Add to main agent's subagents.allowAgents
+    if let Some(list) = json.pointer("/agents/list").and_then(|v| v.as_array()) {
+        if let Some(idx) = list.iter().position(|e| e.get("id").and_then(|v| v.as_str()) == Some("main")) {
+            let path = format!("/agents/list/{}/subagents/allowAgents", idx);
+            if let Some(allow) = json.pointer_mut(&path).and_then(|v| v.as_array_mut()) {
+                let name_val = serde_json::Value::String(agent_name.clone());
+                if !allow.contains(&name_val) {
+                    allow.push(name_val);
+                }
+            } else {
+                // Create subagents.allowAgents if it doesn't exist
+                if let Some(main_entry) = json
+                    .pointer_mut(&format!("/agents/list/{}", idx))
+                    .and_then(|v| v.as_object_mut())
+                {
+                    let subagents = main_entry
+                        .entry("subagents")
+                        .or_insert_with(|| serde_json::json!({}));
+                    if let Some(obj) = subagents.as_object_mut() {
+                        obj.insert(
+                            "allowAgents".to_string(),
+                            serde_json::json!([agent_name]),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    // Write back with pretty formatting
+    let output = serde_json::to_string_pretty(&json)
+        .map_err(|e| format!("Failed to serialize openclaw.json: {}", e))?;
+    std::fs::write(&config_path, output.as_bytes())
+        .map_err(|e| format!("Failed to write openclaw.json: {}", e))?;
+
+    Ok(())
 }

@@ -119,8 +119,8 @@ export default function Home() {
     try { return localStorage.getItem(SECURITY_OFFICER_STORAGE_KEY) || null; } catch { return null; }
   });
 
-  // Agent state: per-gateway agent lists and cached emoji icons
-  const [gatewayAgents, setGatewayAgents] = useState<Record<string, string[]>>({});
+  // Agent state: per-gateway agent lists (agents in list + allowed subagents) and cached emoji icons
+  const [gatewayAgents, setGatewayAgents] = useState<Record<string, { agents: string[]; allowed: string[] }>>({});
   const [agentIcons, setAgentIcons] = useState<Record<string, string>>(loadAgentIcons);
 
   const handleAgentIconChange = useCallback((gatewayId: string, agentName: string, emoji: string) => {
@@ -451,9 +451,9 @@ export default function Home() {
         if (cancelled) break;
         if (!gw.configured || !gw.rootDir) continue;
         try {
-          const agents = await invoke<string[]>("list_workspace_agents", { rootDir: gw.rootDir });
+          const info = await invoke<{ agents: string[]; allowed: string[] }>("list_workspace_agents", { rootDir: gw.rootDir });
           if (!cancelled) {
-            setGatewayAgents((prev) => ({ ...prev, [gw.id]: agents }));
+            setGatewayAgents((prev) => ({ ...prev, [gw.id]: info }));
           }
         } catch { /* ignore */ }
       }
@@ -611,13 +611,28 @@ export default function Home() {
               sharedDir={sharedDir}
               onBusyChange={(busy: boolean) => updateGateway(g.id, { busy })}
               securityOfficerId={securityOfficerId ?? undefined}
-              agents={gatewayAgents[g.id] || []}
+              agents={gatewayAgents[g.id]?.agents || []}
+              allowedAgents={gatewayAgents[g.id]?.allowed || []}
               agentIcons={agentIcons}
               onAgentIconChange={(agentName: string, emoji: string) => handleAgentIconChange(g.id, agentName, emoji)}
+              onRefreshAgents={async () => {
+                if (!g.rootDir) return;
+                try {
+                  const { invoke } = await import("@tauri-apps/api/core");
+                  const info = await invoke<{ agents: string[]; allowed: string[] }>("list_workspace_agents", { rootDir: g.rootDir });
+                  setGatewayAgents((prev) => ({ ...prev, [g.id]: info }));
+                } catch { /* ignore */ }
+              }}
             />
           );
         })}
-        <TaskPanel collapsed={!taskPanelOpen} onToggle={() => setTaskPanelOpen((v) => !v)} />
+        <TaskPanel
+          collapsed={!taskPanelOpen}
+          onToggle={() => setTaskPanelOpen((v) => !v)}
+          rootDir={activeGateway.rootDir}
+          gatewayId={activeGateway.id}
+          serviceState={activeGateway.serviceState}
+        />
       </div>
 
       {/* Custom context menu — scoped to the right-clicked gateway */}
