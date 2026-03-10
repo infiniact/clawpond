@@ -9,6 +9,28 @@ use tauri::{
 
 static WINDOW_COUNTER: AtomicU32 = AtomicU32::new(0);
 
+/// On Windows, prevent console windows from flashing when spawning subprocesses.
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+/// Extension trait to hide console windows on Windows (no-op on other platforms).
+trait HideConsole {
+    fn hide_console(&mut self) -> &mut Self;
+}
+
+impl HideConsole for std::process::Command {
+    #[cfg(target_os = "windows")]
+    fn hide_console(&mut self) -> &mut Self {
+        self.creation_flags(CREATE_NO_WINDOW)
+    }
+    #[cfg(not(target_os = "windows"))]
+    fn hide_console(&mut self) -> &mut Self {
+        self
+    }
+}
+
 #[tauri::command]
 async fn pick_directory() -> Option<String> {
     let handle = rfd::AsyncFileDialog::new()
@@ -36,6 +58,7 @@ fn check_binary_exists(name: String) -> bool {
     #[cfg(target_os = "windows")]
     let result = std::process::Command::new("where")
         .arg(&name)
+        .hide_console()
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false);
@@ -53,6 +76,7 @@ async fn run_shell_command(command: String) -> Result<String, String> {
     #[cfg(target_os = "windows")]
     let output = std::process::Command::new("cmd")
         .args(["/C", &command])
+        .hide_console()
         .output()
         .map_err(|e| e.to_string())?;
     #[cfg(not(target_os = "windows"))]
@@ -105,6 +129,38 @@ async fn remove_directory(path: String) -> Result<(), String> {
     std::fs::remove_dir_all(&expanded).map_err(|e| e.to_string())
 }
 
+/// Detect the current OS and (on Linux) the package manager family.
+/// Returns one of: "macos", "windows", "linux-deb", "linux-rpm", "linux".
+#[tauri::command]
+fn detect_platform() -> String {
+    if cfg!(target_os = "macos") {
+        "macos".into()
+    } else if cfg!(target_os = "windows") {
+        "windows".into()
+    } else {
+        // Linux — check for dpkg (deb) or rpm
+        let has_dpkg = std::process::Command::new("dpkg")
+            .arg("--version")
+            .hide_console()
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if has_dpkg {
+            return "linux-deb".into();
+        }
+        let has_rpm = std::process::Command::new("rpm")
+            .arg("--version")
+            .hide_console()
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if has_rpm {
+            return "linux-rpm".into();
+        }
+        "linux".into()
+    }
+}
+
 #[tauri::command]
 async fn open_url_in_window(app: tauri::AppHandle, url: String, title: String) -> Result<(), String> {
     let id = WINDOW_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -132,6 +188,7 @@ pub fn run() {
             check_binary_exists,
             run_shell_command,
             remove_directory,
+            detect_platform,
             open_url_in_window,
             claw_ui_bridge::connect_master,
             claw_ui_bridge::get_master_status,
@@ -168,6 +225,7 @@ pub fn run() {
             claw_ui_bridge::import_snapshot_from_file,
             claw_ui_bridge::copy_to_workspace,
             claw_ui_bridge::save_base64_to_workspace,
+            claw_ui_bridge::list_workspace_agents,
         ])
         .setup(|app| {
             if cfg!(debug_assertions) {

@@ -5,6 +5,28 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
 
+/// On Windows, prevent console windows from flashing when spawning subprocesses.
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+/// Extension trait to hide console windows on Windows (no-op on other platforms).
+trait HideConsole {
+    fn hide_console(&mut self) -> &mut Self;
+}
+
+impl HideConsole for Command {
+    #[cfg(target_os = "windows")]
+    fn hide_console(&mut self) -> &mut Self {
+        self.creation_flags(CREATE_NO_WINDOW)
+    }
+    #[cfg(not(target_os = "windows"))]
+    fn hide_console(&mut self) -> &mut Self {
+        self
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DockerEnvStatus {
     pub docker_installed: bool,
@@ -64,6 +86,7 @@ where
         .args(["pull", image])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .hide_console()
         .spawn()
     {
         Ok(c) => c,
@@ -190,6 +213,7 @@ where
 pub fn inspect_image(image: &str) -> Option<String> {
     let output = Command::new("docker")
         .args(["image", "inspect", image, "--format", "{{.Id}}"])
+        .hide_console()
         .output()
         .ok()?;
 
@@ -212,7 +236,7 @@ fn extract_status_keyword(status_text: &str) -> String {
 }
 
 fn detect_cmd(cmd: &str, args: &[&str]) -> (bool, Option<String>) {
-    match Command::new(cmd).args(args).output() {
+    match Command::new(cmd).args(args).hide_console().output() {
         Ok(out) if out.status.success() => {
             let version = String::from_utf8_lossy(&out.stdout).trim().to_string();
             (true, Some(version))
@@ -498,6 +522,7 @@ pub fn compose_stats(root_dir: &Path) -> Option<ContainerStats> {
         .args(&base_args)
         .args(["-f", "docker-compose.yml", "ps", "-q", "openclaw-gateway"])
         .current_dir(root_dir)
+        .hide_console()
         .output()
         .ok()?;
 
@@ -517,6 +542,7 @@ pub fn compose_stats(root_dir: &Path) -> Option<ContainerStats> {
             "{{.CPUPerc}}\t{{.MemUsage}}",
             &container_id,
         ])
+        .hide_console()
         .output()
         .ok()?;
 
@@ -600,6 +626,7 @@ where
         .current_dir(root_dir)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .hide_console()
         .spawn()
         .map_err(|e| format!("Failed to run compose up: {}", e))?;
 
@@ -779,6 +806,7 @@ pub fn compose_up(root_dir: &Path) -> Result<(), String> {
         .args(&base_args)
         .args(["-f", "docker-compose.yml", "up", "-d"])
         .current_dir(root_dir)
+        .hide_console()
         .output()
         .map_err(|e| format!("Failed to run compose up: {}", e))?;
 
@@ -798,6 +826,7 @@ pub fn compose_down(root_dir: &Path) -> Result<(), String> {
         .args(&base_args)
         .args(["-f", "docker-compose.yml", "down"])
         .current_dir(root_dir)
+        .hide_console()
         .output()
         .map_err(|e| format!("Failed to run compose down: {}", e))?;
 
@@ -820,6 +849,7 @@ pub fn compose_status(root_dir: &Path) -> ServiceStatus {
         .args(&base_args)
         .args(["-f", "docker-compose.yml", "ps", "--format", "{{.State}}:{{.Health}}", "openclaw-gateway"])
         .current_dir(root_dir)
+        .hide_console()
         .output();
 
     match output {
@@ -1048,6 +1078,7 @@ pub fn browser_up(browser_dir: &Path) -> Result<(), String> {
         .args(&base_args)
         .args(["-f", "docker-compose.yml", "up", "-d"])
         .current_dir(browser_dir)
+        .hide_console()
         .output()
         .map_err(|e| format!("Failed to run browser compose up: {}", e))?;
 
@@ -1067,6 +1098,7 @@ pub fn browser_down(browser_dir: &Path) -> Result<(), String> {
         .args(&base_args)
         .args(["-f", "docker-compose.yml", "down"])
         .current_dir(browser_dir)
+        .hide_console()
         .output()
         .map_err(|e| format!("Failed to run browser compose down: {}", e))?;
 
@@ -1089,6 +1121,7 @@ pub fn browser_status(browser_dir: &Path) -> bool {
         .args(&base_args)
         .args(["-f", "docker-compose.yml", "ps", "--format", "{{.State}}", "shared-browser"])
         .current_dir(browser_dir)
+        .hide_console()
         .output();
 
     match output {

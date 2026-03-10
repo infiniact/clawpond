@@ -8,6 +8,7 @@ import { TopBar } from "../components/top-bar";
 import { IconPlay, IconStop, IconSettings, IconX, IconGlobe, IconPlus, IconSearch, IconCpu, IconHash, IconFolder, IconDownload, IconCheck, IconSpinner, IconXCircle, IconArrowRight, IconShield, IconSun, IconMoon } from "../components/icons";
 import { QuickModelConfig, QuickChannelsConfig } from "../components/quick-config";
 import { RpcPoolProvider } from "../lib/rpc-pool-context";
+import { EMOJI_OPTIONS, FEATURED_COUNT } from "../lib/emoji-data";
 import type { GatewayInfo } from "../lib/rpc-pool";
 import { openUrlInWindow } from "../lib/open-url";
 
@@ -52,6 +53,19 @@ const SHARED_DIR_STORAGE_KEY = "clawpond-shared-dir";
 const BROWSER_CDP_PORT = "18790";
 const THEME_STORAGE_KEY = "clawpond-theme";
 const SECURITY_OFFICER_STORAGE_KEY = "clawpond-security-officer";
+const AGENT_ICONS_STORAGE_KEY = "clawpond-agent-icons";
+
+function loadAgentIcons(): Record<string, string> {
+  try {
+    const raw = localStorage.getItem(AGENT_ICONS_STORAGE_KEY);
+    if (raw) return JSON.parse(raw);
+  } catch { /* ignore */ }
+  return {};
+}
+
+function saveAgentIcons(icons: Record<string, string>) {
+  localStorage.setItem(AGENT_ICONS_STORAGE_KEY, JSON.stringify(icons));
+}
 
 function loadGateways(): Gateway[] {
   try {
@@ -81,61 +95,7 @@ function saveGateways(gateways: Gateway[]) {
   localStorage.setItem(GATEWAYS_STORAGE_KEY, JSON.stringify(stored));
 }
 
-// Emoji data for the icon picker
-const EMOJI_OPTIONS = [
-  { emoji: "🦞", kw: "lobster claw" },
-  { emoji: "🐙", kw: "octopus" },
-  { emoji: "🦊", kw: "fox" },
-  { emoji: "🐺", kw: "wolf" },
-  { emoji: "🦁", kw: "lion" },
-  { emoji: "🐯", kw: "tiger" },
-  { emoji: "🐻", kw: "bear" },
-  { emoji: "🦄", kw: "unicorn" },
-  { emoji: "🐬", kw: "dolphin" },
-  { emoji: "🦈", kw: "shark" },
-  { emoji: "🐉", kw: "dragon" },
-  { emoji: "🦅", kw: "eagle" },
-  { emoji: "🦉", kw: "owl" },
-  { emoji: "🐝", kw: "bee" },
-  { emoji: "🦋", kw: "butterfly" },
-  { emoji: "🔥", kw: "fire hot" },
-  { emoji: "⚡", kw: "lightning bolt electric" },
-  { emoji: "💎", kw: "diamond gem" },
-  { emoji: "🚀", kw: "rocket launch" },
-  { emoji: "🛡️", kw: "shield protect" },
-  { emoji: "⚔️", kw: "sword fight" },
-  { emoji: "🔮", kw: "crystal ball magic" },
-  { emoji: "💡", kw: "light idea" },
-  { emoji: "🎯", kw: "target aim" },
-  { emoji: "🎨", kw: "art paint" },
-  { emoji: "📡", kw: "satellite antenna" },
-  { emoji: "🔬", kw: "microscope science" },
-  { emoji: "🧲", kw: "magnet" },
-  { emoji: "🗝️", kw: "key" },
-  { emoji: "📦", kw: "package box" },
-  { emoji: "🧰", kw: "toolbox" },
-  { emoji: "🎲", kw: "dice game" },
-  { emoji: "⭐", kw: "star" },
-  { emoji: "🌙", kw: "moon night" },
-  { emoji: "☀️", kw: "sun" },
-  { emoji: "🌊", kw: "wave ocean" },
-  { emoji: "🌿", kw: "leaf plant" },
-  { emoji: "🍀", kw: "clover luck" },
-  { emoji: "❄️", kw: "snow ice" },
-  { emoji: "🏗️", kw: "building construction" },
-  { emoji: "🤖", kw: "robot bot ai" },
-  { emoji: "👾", kw: "alien game" },
-  { emoji: "🎮", kw: "game controller" },
-  { emoji: "🔧", kw: "wrench tool" },
-  { emoji: "⚙️", kw: "gear settings" },
-  { emoji: "🏠", kw: "house home" },
-  { emoji: "🏢", kw: "office building" },
-  { emoji: "🌐", kw: "globe world web" },
-  { emoji: "📊", kw: "chart data" },
-  { emoji: "🔒", kw: "lock security" },
-];
-
-const FEATURED_COUNT = 20;
+// Emoji data imported from ../lib/emoji-data
 
 export default function Home() {
   const [gateways, setGateways] = useState<Gateway[]>(loadGateways);
@@ -158,6 +118,18 @@ export default function Home() {
   const [securityOfficerId, setSecurityOfficerId] = useState<string | null>(() => {
     try { return localStorage.getItem(SECURITY_OFFICER_STORAGE_KEY) || null; } catch { return null; }
   });
+
+  // Agent state: per-gateway agent lists and cached emoji icons
+  const [gatewayAgents, setGatewayAgents] = useState<Record<string, string[]>>({});
+  const [agentIcons, setAgentIcons] = useState<Record<string, string>>(loadAgentIcons);
+
+  const handleAgentIconChange = useCallback((gatewayId: string, agentName: string, emoji: string) => {
+    setAgentIcons((prev) => {
+      const next = { ...prev, [`${gatewayId}:${agentName}`]: emoji };
+      saveAgentIcons(next);
+      return next;
+    });
+  }, []);
 
   // Apply theme to <html> element
   useEffect(() => {
@@ -470,6 +442,25 @@ export default function Home() {
     return () => clearInterval(interval);
   }, [activeGateway.configured, activeGateway.rootDir, activeGateway.id, checkHealth]);
 
+  // Fetch workspace agents for all configured gateways with a rootDir
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const { invoke } = await import("@tauri-apps/api/core");
+      for (const gw of gatewaysRef.current) {
+        if (cancelled) break;
+        if (!gw.configured || !gw.rootDir) continue;
+        try {
+          const agents = await invoke<string[]>("list_workspace_agents", { rootDir: gw.rootDir });
+          if (!cancelled) {
+            setGatewayAgents((prev) => ({ ...prev, [gw.id]: agents }));
+          }
+        } catch { /* ignore */ }
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [gateways.map((g) => `${g.id}:${g.configured}:${g.serviceState}`).join(",")]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // Listen for tray gateway start/stop actions
   useEffect(() => {
     const rootDir = activeGateway.rootDir;
@@ -620,6 +611,9 @@ export default function Home() {
               sharedDir={sharedDir}
               onBusyChange={(busy: boolean) => updateGateway(g.id, { busy })}
               securityOfficerId={securityOfficerId ?? undefined}
+              agents={gatewayAgents[g.id] || []}
+              agentIcons={agentIcons}
+              onAgentIconChange={(agentName: string, emoji: string) => handleAgentIconChange(g.id, agentName, emoji)}
             />
           );
         })}

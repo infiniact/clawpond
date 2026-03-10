@@ -605,3 +605,24 @@ pub fn save_base64_to_workspace(
     let filename = dest.file_name().unwrap().to_string_lossy();
     Ok(format!("/home/node/.openclaw/workspace/tmp/{}", filename))
 }
+
+/// Scan `{rootDir}/config/` for files named `workspace-<agent>` and return the agent names.
+#[tauri::command]
+pub fn list_workspace_agents(root_dir: String) -> Result<Vec<String>, String> {
+    let expanded = shellexpand::tilde(&root_dir).to_string();
+    let config_dir = std::path::Path::new(&expanded).join("config");
+    let mut agents = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&config_dir) {
+        for entry in entries.flatten() {
+            if let Some(name) = entry.file_name().to_str() {
+                if let Some(agent) = name.strip_prefix("workspace-") {
+                    if !agent.is_empty() {
+                        agents.push(agent.to_string());
+                    }
+                }
+            }
+        }
+    }
+    agents.sort();
+    Ok(agents)
+}

@@ -37,6 +37,7 @@ import {
   type StoredMessage,
 } from "../lib/chat-store";
 import { recordUsage, estimateTokens } from "../lib/usage-store";
+import { EMOJI_OPTIONS, FEATURED_COUNT } from "../lib/emoji-data";
 
 type Message = {
   id: string;
@@ -50,6 +51,8 @@ type Message = {
   sourceGateway?: { id: string; name: string; emoji: string };
   /** Gateway IDs mentioned in this message */
   mentions?: string[];
+  /** Agent name (workspace agent) that produced this message */
+  agentName?: string;
 };
 
 /** Extract plain text from content that may be a string, a content block {type,text}, or an array of blocks. */
@@ -116,6 +119,9 @@ export function ChatArea({
   onBusyChange,
   startProgress,
   securityOfficerId,
+  agents,
+  agentIcons,
+  onAgentIconChange,
 }: {
   hidden?: boolean;
   onToggleTaskPanel: () => void;
@@ -136,15 +142,75 @@ export function ChatArea({
   onBusyChange?: (busy: boolean) => void;
   startProgress?: ComposeStartProgress;
   securityOfficerId?: string;
+  agents?: string[];
+  agentIcons?: Record<string, string>;
+  onAgentIconChange?: (agentName: string, emoji: string) => void;
 }) {
   const showWizard = !configured || reconfiguring;
   const showChat = configured && !reconfiguring;
+
+  // Emoji picker state for agent icon editing
+  const [emojiPicker, setEmojiPicker] = useState<{ agentName: string; x: number; y: number } | null>(null);
+  const [emojiSearch, setEmojiSearch] = useState("");
+  const [emojiShowAll, setEmojiShowAll] = useState(false);
+  const emojiPickerRef = useRef<HTMLDivElement>(null);
+
+  // Close emoji picker on click outside
+  useEffect(() => {
+    if (!emojiPicker) return;
+    const handler = (e: MouseEvent) => {
+      if (emojiPickerRef.current && !emojiPickerRef.current.contains(e.target as Node)) {
+        setEmojiPicker(null);
+        setEmojiSearch("");
+        setEmojiShowAll(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [emojiPicker]);
+
+  const handleAgentDoubleClick = useCallback((agentName: string, e: React.MouseEvent) => {
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    setEmojiPicker({ agentName, x: rect.left, y: rect.bottom + 4 });
+    setEmojiSearch("");
+    setEmojiShowAll(false);
+  }, []);
+
+  const handleEmojiSelect = useCallback((emoji: string) => {
+    if (emojiPicker && onAgentIconChange) {
+      onAgentIconChange(emojiPicker.agentName, emoji);
+    }
+    setEmojiPicker(null);
+    setEmojiSearch("");
+    setEmojiShowAll(false);
+  }, [emojiPicker, onAgentIconChange]);
+
+  const filteredEmojis = emojiSearch
+    ? EMOJI_OPTIONS.filter((e) => e.kw.toLowerCase().includes(emojiSearch.toLowerCase()))
+    : emojiShowAll ? EMOJI_OPTIONS : EMOJI_OPTIONS.slice(0, FEATURED_COUNT);
 
   return (
     <div className={`flex min-w-0 flex-1 flex-col bg-bg-base${hidden ? " hidden" : ""}`}>
       {/* ── Top bar with toggle buttons ── */}
       <div className="relative z-10 flex h-10 shrink-0 items-center justify-between overflow-visible border-b border-border-subtle px-3">
-        <div className="flex items-center gap-2" />
+        {/* Agent bar */}
+        <div className="flex items-center gap-1.5 overflow-x-auto">
+          {agents && agents.length > 0 && agents.map((agent) => {
+            const iconKey = `${gatewayId}:${agent}`;
+            const icon = agentIcons?.[iconKey] || "🤖";
+            return (
+              <button
+                key={agent}
+                className="flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] font-medium text-text-secondary transition-colors hover:bg-bg-hover ring-1 ring-border-subtle"
+                title={`Agent: ${agent} (double-click to change icon)`}
+                onDoubleClick={(e) => handleAgentDoubleClick(agent, e)}
+              >
+                <span className="text-[13px] leading-none">{icon}</span>
+                <span className="max-w-[80px] truncate">{agent}</span>
+              </button>
+            );
+          })}
+        </div>
 
         {showChat && <UsageHeatmap gatewayId={gatewayId} />}
 
@@ -159,6 +225,44 @@ export function ChatArea({
         </button>
       </div>
 
+      {/* Emoji picker popup for agent icons */}
+      {emojiPicker && (
+        <div
+          ref={emojiPickerRef}
+          className="fixed z-[999] w-[280px] rounded-lg bg-bg-surface p-2 shadow-xl ring-1 ring-border-default"
+          style={{ left: emojiPicker.x, top: emojiPicker.y }}
+        >
+          <input
+            autoFocus
+            type="text"
+            placeholder="Search emoji..."
+            value={emojiSearch}
+            onChange={(e) => setEmojiSearch(e.target.value)}
+            className="mb-2 w-full rounded-md bg-bg-deep px-2 py-1 text-[12px] text-text-primary ring-1 ring-border-default outline-none placeholder:text-text-ghost"
+          />
+          <div className="grid grid-cols-8 gap-1">
+            {filteredEmojis.map((e) => (
+              <button
+                key={e.emoji}
+                onClick={() => handleEmojiSelect(e.emoji)}
+                className="flex h-7 w-7 items-center justify-center rounded-md text-[16px] transition-colors hover:bg-bg-hover"
+                title={e.kw}
+              >
+                {e.emoji}
+              </button>
+            ))}
+          </div>
+          {!emojiSearch && !emojiShowAll && EMOJI_OPTIONS.length > FEATURED_COUNT && (
+            <button
+              onClick={() => setEmojiShowAll(true)}
+              className="mt-1 w-full text-center text-[11px] text-text-ghost hover:text-text-secondary"
+            >
+              Show more...
+            </button>
+          )}
+        </div>
+      )}
+
       {/* ── Content ── */}
       <div className={`flex min-h-0 flex-1 flex-col ${showWizard ? "" : "hidden"}`}>
         <ConfigWizard
@@ -171,7 +275,7 @@ export function ChatArea({
       </div>
       {configured && (
         <div className={`flex min-h-0 flex-1 flex-col ${showChat ? "" : "hidden"}`}>
-          <ChatView rootDir={rootDir} serviceState={serviceState} lastError={lastError} startProgress={startProgress} hidden={hidden} gatewayId={gatewayId} gatewayName={gatewayName} gatewayEmoji={gatewayEmoji} onBusyChange={onBusyChange} securityOfficerId={securityOfficerId} />
+          <ChatView rootDir={rootDir} serviceState={serviceState} lastError={lastError} startProgress={startProgress} hidden={hidden} gatewayId={gatewayId} gatewayName={gatewayName} gatewayEmoji={gatewayEmoji} onBusyChange={onBusyChange} securityOfficerId={securityOfficerId} agents={agents} agentIcons={agentIcons} />
         </div>
       )}
     </div>
@@ -187,6 +291,7 @@ function toStored(msg: Message): StoredMessage {
     tool: msg.tool,
     ...(msg.sourceGateway ? { sourceGateway: msg.sourceGateway } : {}),
     ...(msg.mentions ? { mentions: msg.mentions } : {}),
+    ...(msg.agentName ? { agentName: msg.agentName } : {}),
   };
 }
 
@@ -199,10 +304,11 @@ function fromStored(msg: StoredMessage): Message {
     tool: msg.tool,
     ...(msg.sourceGateway ? { sourceGateway: msg.sourceGateway } : {}),
     ...(msg.mentions ? { mentions: msg.mentions } : {}),
+    ...(msg.agentName ? { agentName: msg.agentName } : {}),
   };
 }
 
-function ChatView({ rootDir, serviceState, lastError, startProgress, hidden, gatewayId, gatewayName, gatewayEmoji, onBusyChange, securityOfficerId }: { rootDir: string | null; serviceState: string; lastError?: string; startProgress?: ComposeStartProgress; hidden?: boolean; gatewayId: string; gatewayName: string; gatewayEmoji: string; onBusyChange?: (busy: boolean) => void; securityOfficerId?: string }) {
+function ChatView({ rootDir, serviceState, lastError, startProgress, hidden, gatewayId, gatewayName, gatewayEmoji, onBusyChange, securityOfficerId, agents, agentIcons }: { rootDir: string | null; serviceState: string; lastError?: string; startProgress?: ComposeStartProgress; hidden?: boolean; gatewayId: string; gatewayName: string; gatewayEmoji: string; onBusyChange?: (busy: boolean) => void; securityOfficerId?: string; agents?: string[]; agentIcons?: Record<string, string> }) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [connected, setConnected] = useState(false);
@@ -666,6 +772,9 @@ function ChatView({ rootDir, serviceState, lastError, startProgress, hidden, gat
         if (typeof delta === "string" && delta) {
           streamBuf.current += delta;
           const msgId = streamMsgId.current || `stream-${Date.now()}`;
+          // Try to extract agent name from event payload
+          const eventAgent = event.payload?.agent || event.payload?.agentId || event.payload?.workspace || event.payload?.data?.agent || event.payload?.data?.workspace;
+          const resolvedAgent: string | undefined = typeof eventAgent === "string" && eventAgent ? eventAgent : undefined;
           if (!streamMsgId.current) {
             streamMsgId.current = msgId;
             streamSource.current = "agent";
@@ -676,10 +785,11 @@ function ChatView({ rootDir, serviceState, lastError, startProgress, hidden, gat
               content: streamBuf.current,
               timestamp: new Date(),
               streaming: true,
+              agentName: resolvedAgent,
             }]);
           } else {
             setMessages((prev) => prev.map((m) =>
-              m.id === msgId ? { ...m, content: streamBuf.current } : m
+              m.id === msgId ? { ...m, content: streamBuf.current, ...(resolvedAgent && !m.agentName ? { agentName: resolvedAgent } : {}) } : m
             ));
           }
         }
@@ -1637,6 +1747,7 @@ function ChatView({ rootDir, serviceState, lastError, startProgress, hidden, gat
                 msg={msg}
                 gatewayEmoji={gatewayEmoji}
                 onAddToContext={(text) => setInput((prev) => prev ? prev + "\n" + text : text)}
+                agentIcon={msg.agentName && agentIcons?.[`${gatewayId}:${msg.agentName}`] ? agentIcons[`${gatewayId}:${msg.agentName}`] : undefined}
               />
             );
           })}
@@ -1952,10 +2063,12 @@ function MessageBubble({
   msg,
   gatewayEmoji,
   onAddToContext,
+  agentIcon,
 }: {
   msg: Message;
   gatewayEmoji: string;
   onAddToContext: (text: string) => void;
+  agentIcon?: string;
 }) {
   const bubbleRef = useRef<HTMLDivElement>(null);
   const [popup, setPopup] = useState<{ x: number; y: number; text: string } | null>(null);
@@ -2011,8 +2124,15 @@ function MessageBubble({
   return (
     <div className={`flex gap-3 ${msg.role === "user" ? "justify-end" : ""}`}>
       {msg.role === "assistant" && (
-        <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-bg-surface ring-1 ring-border-default">
-          <span className="text-[14px] leading-none">{msg.sourceGateway ? msg.sourceGateway.emoji : gatewayEmoji}</span>
+        <div className="flex shrink-0 items-start gap-1">
+          <div className="flex h-7 w-7 items-center justify-center rounded-full bg-bg-surface ring-1 ring-border-default">
+            <span className="text-[14px] leading-none">{msg.sourceGateway ? msg.sourceGateway.emoji : gatewayEmoji}</span>
+          </div>
+          {agentIcon && (
+            <div className="flex h-5 w-5 items-center justify-center rounded-full bg-bg-elevated ring-1 ring-border-subtle mt-0.5" title={msg.agentName}>
+              <span className="text-[11px] leading-none">{agentIcon}</span>
+            </div>
+          )}
         </div>
       )}
       <div

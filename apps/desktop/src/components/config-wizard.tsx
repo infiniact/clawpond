@@ -1,6 +1,14 @@
 "use client";
 
 import { useState, useEffect, useRef } from "react";
+
+type OSPlatform = "macos" | "windows" | "linux";
+function detectOS(): OSPlatform {
+  const ua = navigator.userAgent.toLowerCase();
+  if (ua.includes("win")) return "windows";
+  if (ua.includes("linux")) return "linux";
+  return "macos";
+}
 import {
   IconDownload,
   IconFolder,
@@ -881,19 +889,7 @@ export function ConfigWizard({ onComplete, onClose, skipDocker, fixedRootDir, sh
                     <EnvRow label="Docker Compose" checking={dockerStatus.checking} ok={dockerStatus.compose} version={dockerStatus.composeVersion} />
                   </div>
                   {!dockerStatus.checking && (!dockerStatus.docker || !dockerStatus.compose) && (
-                    <div className="mt-2 space-y-2">
-                      <p className="text-[11px] font-medium text-accent-red">
-                        Missing dependencies detected. Install via terminal:
-                      </p>
-                      <div className="space-y-1">
-                        {!dockerStatus.docker && (
-                          <CmdBlock cmd="brew install colima docker && colima start" label="Install Docker runtime (macOS)" />
-                        )}
-                        {!dockerStatus.compose && (
-                          <CmdBlock cmd="brew install docker-compose" label="Install Docker Compose" />
-                        )}
-                      </div>
-                    </div>
+                    <DockerInstallHint dockerMissing={!dockerStatus.docker} composeMissing={!dockerStatus.compose} />
                   )}
                   {!dockerStatus.checking && (
                     <button onClick={checkDocker} className="mt-1 text-[11px] font-medium text-accent-emerald hover:underline">
@@ -1649,6 +1645,120 @@ function EnvRow({
           Not found
         </span>
       )}
+    </div>
+  );
+}
+
+function DockerInstallHint({ dockerMissing, composeMissing }: { dockerMissing: boolean; composeMissing: boolean }) {
+  const [platform, setPlatform] = useState<string | null>(null);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const p = await invoke<string>("detect_platform");
+        setPlatform(p);
+      } catch {
+        setPlatform(detectOS());
+      }
+    })();
+  }, []);
+
+  if (!platform) return null;
+
+  if (platform === "windows") {
+    return (
+      <div className="mt-2 space-y-2">
+        <p className="text-[11px] font-medium text-accent-red">
+          Missing dependencies detected. Please install Docker Desktop for Windows:
+        </p>
+        <div className="space-y-1">
+          <LinkBlock
+            url="https://docs.docker.com/desktop/setup/install/windows-install/"
+            label="Download Docker Desktop for Windows (includes Docker Compose)"
+          />
+          <p className="text-[10px] text-text-ghost">
+            Docker Desktop includes both Docker Engine and Docker Compose. After installation, launch Docker Desktop and ensure it is running.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  if (platform.startsWith("linux")) {
+    const isDeb = platform === "linux-deb";
+    const isRpm = platform === "linux-rpm";
+    return (
+      <div className="mt-2 space-y-2">
+        <p className="text-[11px] font-medium text-accent-red">
+          Missing dependencies detected. Install via terminal:
+        </p>
+        <div className="space-y-1">
+          {dockerMissing && isDeb && (
+            <CmdBlock cmd="sudo apt-get update && sudo apt-get install -y docker.io" label="Install Docker (Debian/Ubuntu)" />
+          )}
+          {dockerMissing && isRpm && (
+            <CmdBlock cmd="sudo dnf install -y docker-ce docker-ce-cli containerd.io" label="Install Docker (Fedora/RHEL)" />
+          )}
+          {dockerMissing && !isDeb && !isRpm && (
+            <CmdBlock cmd="curl -fsSL https://get.docker.com | sh" label="Install Docker (Linux)" />
+          )}
+          {composeMissing && isDeb && (
+            <CmdBlock cmd="sudo apt-get install -y docker-compose-plugin" label="Install Docker Compose (Debian/Ubuntu)" />
+          )}
+          {composeMissing && isRpm && (
+            <CmdBlock cmd="sudo dnf install -y docker-compose-plugin" label="Install Docker Compose (Fedora/RHEL)" />
+          )}
+          {composeMissing && !isDeb && !isRpm && (
+            <CmdBlock cmd="sudo mkdir -p /usr/local/lib/docker/cli-plugins && sudo curl -SL https://github.com/docker/compose/releases/latest/download/docker-compose-linux-$(uname -m) -o /usr/local/lib/docker/cli-plugins/docker-compose && sudo chmod +x /usr/local/lib/docker/cli-plugins/docker-compose" label="Install Docker Compose (Linux)" />
+          )}
+        </div>
+        <p className="text-[10px] text-text-ghost">
+          After installation, ensure Docker is running: <code className="rounded bg-bg-elevated px-1 py-px font-mono text-[10px]">sudo systemctl start docker</code>
+        </p>
+      </div>
+    );
+  }
+
+  // macOS (default)
+  return (
+    <div className="mt-2 space-y-2">
+      <p className="text-[11px] font-medium text-accent-red">
+        Missing dependencies detected. Install via terminal:
+      </p>
+      <div className="space-y-1">
+        {dockerMissing && (
+          <CmdBlock cmd="brew install colima docker && colima start" label="Install Docker runtime (macOS)" />
+        )}
+        {composeMissing && (
+          <CmdBlock cmd="brew install docker-compose" label="Install Docker Compose" />
+        )}
+      </div>
+    </div>
+  );
+}
+
+function LinkBlock({ url, label }: { url: string; label: string }) {
+  async function handleOpen() {
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      await invoke("open_url_in_window", { url, title: label });
+    } catch {
+      window.open(url, "_blank");
+    }
+  }
+
+  return (
+    <div>
+      <p className="mb-0.5 text-[10px] text-text-ghost">{label}</p>
+      <div className="flex items-center gap-1.5 rounded-md bg-bg-elevated px-2.5 py-1.5 ring-1 ring-border-subtle">
+        <button
+          onClick={handleOpen}
+          className="flex-1 text-left font-mono text-[11px] text-accent-emerald hover:underline"
+        >
+          {url}
+        </button>
+      </div>
     </div>
   );
 }

@@ -11,6 +11,7 @@ export type StoredMessage = {
   tool?: { name: string; status: "running" | "done" | "error" };
   sourceGateway?: { id: string; name: string; emoji: string };
   mentions?: string[];
+  agentName?: string;
 };
 
 const STORAGE_PREFIX = "clawpond-chat:";
