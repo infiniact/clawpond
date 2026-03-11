@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback } from "react";
+import { useCallback, useEffect, useState } from "react";
 import Image from "next/image";
 import { IconSettings, IconSun, IconMoon } from "./icons";
 
@@ -58,6 +58,20 @@ function WindowControls() {
 }
 
 export function TopBar({ onSettings, theme, onToggleTheme }: { onSettings?: () => void; theme?: "dark" | "light"; onToggleTheme?: () => void }) {
+  const [isWindows, setIsWindows] = useState(false);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const platform = await invoke<string>("detect_platform");
+        setIsWindows(platform === "windows");
+      } catch {
+        setIsWindows(navigator.userAgent.toLowerCase().includes("win"));
+      }
+    })();
+  }, []);
+
   return (
     <header className="flex h-11 shrink-0 items-center border-b border-border-subtle bg-bg-deep">
       {/* Left: branding */}
@@ -78,7 +92,7 @@ export function TopBar({ onSettings, theme, onToggleTheme }: { onSettings?: () =
       {/* Center: drag region (fills remaining space) */}
       <div className="flex-1 h-full" data-tauri-drag-region="" />
 
-      {/* Right: theme toggle + settings + window controls */}
+      {/* Right: theme toggle + settings */}
       <div className="flex items-center gap-2 px-2">
         {onToggleTheme && (
           <button
@@ -103,7 +117,8 @@ export function TopBar({ onSettings, theme, onToggleTheme }: { onSettings?: () =
           </button>
         )}
       </div>
-      <WindowControls />
+      {/* Custom window controls — only on Windows (native decorations are disabled) */}
+      {isWindows && <WindowControls />}
     </header>
   );
 }

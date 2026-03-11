@@ -241,6 +241,14 @@ pub fn run() {
                 )?;
             }
 
+            // On Windows, remove native title bar & frame — the frontend renders custom controls.
+            #[cfg(target_os = "windows")]
+            {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.set_decorations(false);
+                }
+            }
+
             // ── System tray ──
             let start_gateway =
                 MenuItem::with_id(app, "start_gateway", "Start Gateway", true, None::<&str>)?;
