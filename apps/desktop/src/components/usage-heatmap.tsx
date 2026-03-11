@@ -144,6 +144,7 @@ export function UsageHeatmap({ gatewayId }: { gatewayId: string }) {
   const [dailyUsage, setDailyUsage] = useState<DayUsage[]>([]);
   const [hourlyUsage, setHourlyUsage] = useState<HourUsage[]>([]);
   const [hoveredItem, setHoveredItem] = useState<string | null>(null);
+  const [totalRange, setTotalRange] = useState<"7d" | "30d">("7d");
 
   const fetchFromRpc = useCallback(async (): Promise<boolean> => {
     const gw = gateways.find((g) => g.id === gatewayId);
@@ -190,8 +191,44 @@ export function UsageHeatmap({ gatewayId }: { gatewayId: string }) {
 
   const currentHour = new Date().getHours();
 
+  // Calculate total based on selected range
+  const rangeTotal = (() => {
+    const todayTokens = hourlyUsage.reduce((sum, h) => sum + h.tokens, 0);
+    if (totalRange === "7d") {
+      return dailyUsage.reduce((sum, d) => sum + d.tokens, 0) + todayTokens;
+    }
+    // 30d: read from localStorage for the full 30-day range
+    const monthly = getDailyUsage(gatewayId, 30);
+    return monthly.reduce((sum, d) => sum + d.tokens, 0) + todayTokens;
+  })();
+
   return (
-    <div className="relative flex items-start gap-1 overflow-visible">
+    <div className="relative flex items-center gap-1.5 overflow-visible">
+      {/* Total badge — click to toggle 7d/30d */}
+      <div
+        className="relative flex flex-col items-center"
+        onMouseEnter={() => setHoveredItem("range-total")}
+        onMouseLeave={() => setHoveredItem(null)}
+      >
+        <button
+          onClick={() => setTotalRange((v) => (v === "7d" ? "30d" : "7d"))}
+          className="flex h-[18px] cursor-pointer items-center gap-1 rounded-md bg-bg-surface px-1.5 ring-1 ring-border-default transition-colors hover:ring-border-strong"
+        >
+          <svg width="10" height="10" viewBox="0 0 16 16" fill="none" className="text-text-ghost">
+            <path d="M2 4h12M2 8h12M2 12h8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+          </svg>
+          <span className="text-[9px] font-medium text-text-tertiary">{formatTokens(rangeTotal)}</span>
+          <span className="text-[8px] text-text-ghost">{totalRange === "7d" ? "7d" : "30d"}</span>
+        </button>
+        {hoveredItem === "range-total" && (
+          <div className="absolute left-1/2 top-full z-50 mt-1 -translate-x-1/2 whitespace-nowrap rounded bg-bg-deep px-2 py-1 text-[10px] text-text-secondary shadow-xl ring-1 ring-border-subtle">
+            {totalRange === "7d" ? "7-day" : "30-day"} total: {formatTokens(rangeTotal)} tokens (click to switch)
+          </div>
+        )}
+      </div>
+
+      <div className="mx-0.5 h-[18px] w-px bg-border-subtle" />
+
       {/* Past 6 days — color: 0~1亿 */}
       {dailyUsage.map((d) => {
         const key = `day-${d.date}`;

@@ -4,7 +4,6 @@ import { useState, useEffect, useCallback } from "react";
 import {
   IconClock,
   IconPlus,
-  IconChevronRight,
   IconX,
   IconSpinner,
 } from "./icons";
@@ -79,14 +78,10 @@ function generateUUID(): string {
 }
 
 export function TaskPanel({
-  collapsed,
-  onToggle,
   rootDir,
   gatewayId,
   serviceState,
 }: {
-  collapsed: boolean;
-  onToggle: () => void;
   rootDir: string | null;
   gatewayId: string;
   serviceState: string;
@@ -98,6 +93,7 @@ export function TaskPanel({
   const [addSchedule, setAddSchedule] = useState("0 9 * * * Asia/Shanghai");
   const [saving, setSaving] = useState(false);
   const [fullState, setFullState] = useState<HeartbeatState>({ lastChecks: {}, cronJobs: {} });
+  const [hovered, setHovered] = useState(false);
 
   const loadTasks = useCallback(async () => {
     if (!rootDir) {
@@ -175,162 +171,173 @@ export function TaskPanel({
   const isUnconfigured = !rootDir || serviceState === "unconfigured";
 
   return (
-    <aside
-      className={`flex h-full shrink-0 flex-col border-l border-border-subtle bg-bg-deep transition-all duration-200 ${
-        collapsed ? "w-0 overflow-hidden border-l-0 opacity-0" : "w-[272px] opacity-100"
-      }`}
+    <div
+      className="absolute right-0 top-0 z-50"
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
     >
-      {/* Header */}
-      <div className="flex h-10 shrink-0 items-center justify-between border-b border-border-subtle px-4">
-        <div className="flex items-center gap-2">
-          <IconClock size={14} className="text-text-tertiary" />
-          <span className="whitespace-nowrap text-[12px] font-semibold text-text-primary">
-            Scheduled Tasks
-          </span>
+      {/* Trigger icon — always visible in top-right */}
+      <div className="flex h-10 w-10 items-center justify-center">
+        <div className="relative flex h-7 w-7 cursor-pointer items-center justify-center rounded-md text-text-tertiary transition-colors hover:bg-bg-hover hover:text-text-secondary">
+          <IconClock size={14} />
           {tasks.length > 0 && (
-            <span className="rounded-full bg-bg-surface px-1.5 py-0.5 text-[10px] font-medium text-text-ghost ring-1 ring-border-default">
+            <span className="absolute -right-1 -top-1 flex h-3.5 min-w-[14px] items-center justify-center rounded-full bg-accent-emerald px-0.5 text-[8px] font-bold leading-none text-white">
               {tasks.length}
             </span>
           )}
         </div>
-        <button
-          onClick={onToggle}
-          className="flex h-6 w-6 items-center justify-center rounded text-text-tertiary transition-colors hover:bg-bg-hover hover:text-text-secondary"
-        >
-          <IconChevronRight size={14} />
-        </button>
       </div>
 
-      {/* Content */}
-      <div className="flex flex-1 flex-col overflow-y-auto">
-        {loading ? (
-          <div className="flex flex-1 items-center justify-center">
-            <IconSpinner size={18} className="animate-spin text-text-ghost" />
-          </div>
-        ) : isUnconfigured ? (
-          <div className="flex flex-1 flex-col items-center justify-center px-6">
-            <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-bg-surface ring-1 ring-border-default">
-              <IconClock size={22} className="text-text-ghost" />
+      {/* Expanded sidebar panel — drops down on hover */}
+      {hovered && (
+        <aside className="absolute right-0 top-10 flex w-[272px] flex-col rounded-bl-xl border-b border-l border-border-subtle bg-bg-deep/95 shadow-xl backdrop-blur-sm" style={{ maxHeight: "calc(100vh - 88px)" }}>
+          {/* Header */}
+          <div className="flex h-10 shrink-0 items-center border-b border-border-subtle px-4">
+            <div className="flex items-center gap-2">
+              <IconClock size={14} className="text-text-tertiary" />
+              <span className="whitespace-nowrap text-[12px] font-semibold text-text-primary">
+                Scheduled Tasks
+              </span>
+              {tasks.length > 0 && (
+                <span className="rounded-full bg-bg-surface px-1.5 py-0.5 text-[10px] font-medium text-text-ghost ring-1 ring-border-default">
+                  {tasks.length}
+                </span>
+              )}
             </div>
-            <p className="mt-4 whitespace-nowrap text-[13px] font-medium text-text-secondary">
-              No gateway configured
-            </p>
-            <p className="mt-1 whitespace-nowrap text-center text-[11px] leading-relaxed text-text-ghost">
-              Configure a gateway first
-            </p>
           </div>
-        ) : tasks.length === 0 && !showAddForm ? (
-          <div className="flex flex-1 flex-col items-center justify-center px-6">
-            <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-bg-surface ring-1 ring-border-default">
-              <IconClock size={22} className="text-text-ghost" />
-            </div>
-            <p className="mt-4 whitespace-nowrap text-[13px] font-medium text-text-secondary">
-              No scheduled tasks
-            </p>
-            <p className="mt-1 whitespace-nowrap text-center text-[11px] leading-relaxed text-text-ghost">
-              Create a task to run automatically
-            </p>
-          </div>
-        ) : (
-          <div className="flex flex-col gap-1.5 p-3">
-            {tasks.map((task) => (
-              <div
-                key={task.key}
-                className="group relative rounded-lg bg-bg-surface p-3 ring-1 ring-border-default transition-colors hover:ring-border-strong"
-              >
-                <div className="flex items-start justify-between gap-2">
-                  <div className="min-w-0 flex-1">
-                    <p className="truncate text-[12px] font-medium text-text-primary">
-                      {task.name}
-                    </p>
-                    <p className="mt-0.5 text-[11px] text-text-tertiary">
-                      {describeCron(task.schedule)}
-                    </p>
-                    <p className="mt-0.5 text-[10px] text-text-ghost">
-                      {task.createdAt}
-                    </p>
-                  </div>
-                  <button
-                    onClick={() => handleDelete(task.key)}
-                    className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-text-ghost opacity-0 transition-all hover:bg-bg-hover hover:text-accent-red group-hover:opacity-100"
-                    title="Delete task"
+
+          {/* Content */}
+          <div className="flex flex-1 flex-col overflow-y-auto">
+            {loading ? (
+              <div className="flex flex-1 items-center justify-center py-12">
+                <IconSpinner size={18} className="animate-spin text-text-ghost" />
+              </div>
+            ) : isUnconfigured ? (
+              <div className="flex flex-col items-center justify-center px-6 py-10">
+                <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-bg-surface ring-1 ring-border-default">
+                  <IconClock size={22} className="text-text-ghost" />
+                </div>
+                <p className="mt-4 whitespace-nowrap text-[13px] font-medium text-text-secondary">
+                  No gateway configured
+                </p>
+                <p className="mt-1 whitespace-nowrap text-center text-[11px] leading-relaxed text-text-ghost">
+                  Configure a gateway first
+                </p>
+              </div>
+            ) : tasks.length === 0 && !showAddForm ? (
+              <div className="flex flex-col items-center justify-center px-6 py-10">
+                <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-bg-surface ring-1 ring-border-default">
+                  <IconClock size={22} className="text-text-ghost" />
+                </div>
+                <p className="mt-4 whitespace-nowrap text-[13px] font-medium text-text-secondary">
+                  No scheduled tasks
+                </p>
+                <p className="mt-1 whitespace-nowrap text-center text-[11px] leading-relaxed text-text-ghost">
+                  Create a task to run automatically
+                </p>
+              </div>
+            ) : (
+              <div className="flex flex-col gap-1.5 p-3">
+                {tasks.map((task) => (
+                  <div
+                    key={task.key}
+                    className="group relative rounded-lg bg-bg-surface p-3 ring-1 ring-border-default transition-colors hover:ring-border-strong"
                   >
-                    <IconX size={12} />
-                  </button>
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate text-[12px] font-medium text-text-primary">
+                          {task.name}
+                        </p>
+                        <p className="mt-0.5 text-[11px] text-text-tertiary">
+                          {describeCron(task.schedule)}
+                        </p>
+                        <p className="mt-0.5 text-[10px] text-text-ghost">
+                          {task.createdAt}
+                        </p>
+                      </div>
+                      <button
+                        onClick={() => handleDelete(task.key)}
+                        className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-text-ghost opacity-0 transition-all hover:bg-bg-hover hover:text-accent-red group-hover:opacity-100"
+                        title="Delete task"
+                      >
+                        <IconX size={12} />
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Inline add form */}
+            {showAddForm && (
+              <div className="border-t border-border-subtle p-3">
+                <div className="rounded-lg bg-bg-surface p-3 ring-1 ring-border-default">
+                  <label className="mb-1 block text-[11px] font-medium text-text-secondary">
+                    Task Name
+                  </label>
+                  <input
+                    type="text"
+                    value={addName}
+                    onChange={(e) => setAddName(e.target.value)}
+                    placeholder="e.g. Daily Report"
+                    autoFocus
+                    className="mb-2 w-full rounded-md bg-bg-deep px-2.5 py-1.5 text-[12px] text-text-primary ring-1 ring-border-default placeholder:text-text-ghost focus:outline-none focus:ring-border-strong"
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && addName.trim()) handleAdd();
+                      if (e.key === "Escape") setShowAddForm(false);
+                    }}
+                  />
+                  <label className="mb-1 block text-[11px] font-medium text-text-secondary">
+                    Cron Schedule
+                  </label>
+                  <input
+                    type="text"
+                    value={addSchedule}
+                    onChange={(e) => setAddSchedule(e.target.value)}
+                    placeholder="0 9 * * * Asia/Shanghai"
+                    className="mb-1 w-full rounded-md bg-bg-deep px-2.5 py-1.5 font-mono text-[11px] text-text-primary ring-1 ring-border-default placeholder:text-text-ghost focus:outline-none focus:ring-border-strong"
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && addName.trim()) handleAdd();
+                      if (e.key === "Escape") setShowAddForm(false);
+                    }}
+                  />
+                  <p className="mb-3 text-[10px] text-text-ghost">
+                    {describeCron(addSchedule)}
+                  </p>
+                  <div className="flex items-center justify-end gap-2">
+                    <button
+                      onClick={() => setShowAddForm(false)}
+                      className="rounded-md px-2.5 py-1 text-[11px] text-text-tertiary hover:text-text-secondary"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      onClick={handleAdd}
+                      disabled={!addName.trim() || saving}
+                      className="inline-flex items-center gap-1 rounded-md bg-accent-emerald/15 px-2.5 py-1 text-[11px] font-medium text-accent-emerald ring-1 ring-accent-emerald/25 hover:bg-accent-emerald/25 disabled:opacity-40"
+                    >
+                      {saving ? <IconSpinner size={11} className="animate-spin" /> : <IconPlus size={11} />}
+                      Save
+                    </button>
+                  </div>
                 </div>
               </div>
-            ))}
+            )}
           </div>
-        )}
 
-        {/* Inline add form */}
-        {showAddForm && (
+          {/* Footer */}
           <div className="border-t border-border-subtle p-3">
-            <div className="rounded-lg bg-bg-surface p-3 ring-1 ring-border-default">
-              <label className="mb-1 block text-[11px] font-medium text-text-secondary">
-                Task Name
-              </label>
-              <input
-                type="text"
-                value={addName}
-                onChange={(e) => setAddName(e.target.value)}
-                placeholder="e.g. Daily Report"
-                autoFocus
-                className="mb-2 w-full rounded-md bg-bg-deep px-2.5 py-1.5 text-[12px] text-text-primary ring-1 ring-border-default placeholder:text-text-ghost focus:outline-none focus:ring-border-strong"
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && addName.trim()) handleAdd();
-                  if (e.key === "Escape") setShowAddForm(false);
-                }}
-              />
-              <label className="mb-1 block text-[11px] font-medium text-text-secondary">
-                Cron Schedule
-              </label>
-              <input
-                type="text"
-                value={addSchedule}
-                onChange={(e) => setAddSchedule(e.target.value)}
-                placeholder="0 9 * * * Asia/Shanghai"
-                className="mb-1 w-full rounded-md bg-bg-deep px-2.5 py-1.5 font-mono text-[11px] text-text-primary ring-1 ring-border-default placeholder:text-text-ghost focus:outline-none focus:ring-border-strong"
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && addName.trim()) handleAdd();
-                  if (e.key === "Escape") setShowAddForm(false);
-                }}
-              />
-              <p className="mb-3 text-[10px] text-text-ghost">
-                {describeCron(addSchedule)}
-              </p>
-              <div className="flex items-center justify-end gap-2">
-                <button
-                  onClick={() => setShowAddForm(false)}
-                  className="rounded-md px-2.5 py-1 text-[11px] text-text-tertiary hover:text-text-secondary"
-                >
-                  Cancel
-                </button>
-                <button
-                  onClick={handleAdd}
-                  disabled={!addName.trim() || saving}
-                  className="inline-flex items-center gap-1 rounded-md bg-accent-emerald/15 px-2.5 py-1 text-[11px] font-medium text-accent-emerald ring-1 ring-accent-emerald/25 hover:bg-accent-emerald/25 disabled:opacity-40"
-                >
-                  {saving ? <IconSpinner size={11} className="animate-spin" /> : <IconPlus size={11} />}
-                  Save
-                </button>
-              </div>
-            </div>
+            <button
+              onClick={() => setShowAddForm(true)}
+              disabled={isUnconfigured || showAddForm}
+              className="flex w-full items-center justify-center gap-2 rounded-lg border border-dashed border-border-default py-2 text-[12px] font-medium text-text-tertiary transition-all hover:border-border-strong hover:bg-bg-surface hover:text-text-secondary disabled:opacity-40 disabled:hover:border-border-default disabled:hover:bg-transparent disabled:hover:text-text-tertiary"
+            >
+              <IconPlus size={13} />
+              Add Task
+            </button>
           </div>
-        )}
-      </div>
-
-      {/* Footer */}
-      <div className="border-t border-border-subtle p-3">
-        <button
-          onClick={() => setShowAddForm(true)}
-          disabled={isUnconfigured || showAddForm}
-          className="flex w-full items-center justify-center gap-2 rounded-lg border border-dashed border-border-default py-2 text-[12px] font-medium text-text-tertiary transition-all hover:border-border-strong hover:bg-bg-surface hover:text-text-secondary disabled:opacity-40 disabled:hover:border-border-default disabled:hover:bg-transparent disabled:hover:text-text-tertiary"
-        >
-          <IconPlus size={13} />
-          Add Task
-        </button>
-      </div>
-    </aside>
+        </aside>
+      )}
+    </div>
   );
 }

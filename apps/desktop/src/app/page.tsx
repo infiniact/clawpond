@@ -101,7 +101,7 @@ export default function Home() {
   const [gateways, setGateways] = useState<Gateway[]>(loadGateways);
   const [activeGatewayId, setActiveGatewayId] = useState("default");
   const [sidebarExpanded, setSidebarExpanded] = useState(false);
-  const [taskPanelOpen, setTaskPanelOpen] = useState(true);
+
   const [addGatewayModal, setAddGatewayModal] = useState(false);
   const [reconfiguring, setReconfiguring] = useState(false);
   const [quickConfig, setQuickConfig] = useState<"model" | "channels" | null>(null);
@@ -573,7 +573,7 @@ export default function Home() {
         theme={theme}
         onToggleTheme={toggleTheme}
       />
-      <div className="flex min-h-0 flex-1">
+      <div className="relative flex min-h-0 flex-1">
         <Sidebar
           expanded={sidebarExpanded}
           onToggleExpanded={() => setSidebarExpanded((v) => !v)}
@@ -590,8 +590,6 @@ export default function Home() {
             <ChatArea
               key={g.id}
               hidden={!isActive}
-              onToggleTaskPanel={() => setTaskPanelOpen((v) => !v)}
-              taskPanelOpen={taskPanelOpen}
               gatewayName={g.name}
               gatewayEmoji={g.emoji}
               gatewayId={g.id}
@@ -627,8 +625,6 @@ export default function Home() {
           );
         })}
         <TaskPanel
-          collapsed={!taskPanelOpen}
-          onToggle={() => setTaskPanelOpen((v) => !v)}
           rootDir={activeGateway.rootDir}
           gatewayId={activeGateway.id}
           serviceState={activeGateway.serviceState}

@@ -8,7 +8,6 @@ import { openUrlInWindow } from "../lib/open-url";
 import type { ComposeStartProgress } from "../app/page";
 import {
   IconChat,
-  IconChevronRight,
   IconCode,
   IconSend,
   IconBot,
@@ -101,8 +100,6 @@ type ExecApproval = {
 
 export function ChatArea({
   hidden,
-  onToggleTaskPanel,
-  taskPanelOpen,
   gatewayName,
   gatewayEmoji,
   gatewayId,
@@ -126,8 +123,6 @@ export function ChatArea({
   onRefreshAgents,
 }: {
   hidden?: boolean;
-  onToggleTaskPanel: () => void;
-  taskPanelOpen: boolean;
   gatewayName: string;
   gatewayEmoji: string;
   gatewayId: string;
@@ -239,9 +234,9 @@ export function ChatArea({
   return (
     <div className={`flex min-w-0 flex-1 flex-col bg-bg-base${hidden ? " hidden" : ""}`}>
       {/* ── Top bar with toggle buttons ── */}
-      <div className="relative z-10 flex h-10 shrink-0 items-center justify-between overflow-visible border-b border-border-subtle px-3">
-        {/* Agent bar */}
-        <div className="flex items-center gap-1.5 overflow-x-auto">
+      <div className="relative z-10 flex h-10 shrink-0 items-center overflow-visible border-b border-border-subtle px-3">
+        {/* Agent bar — left */}
+        <div className="flex shrink-0 items-center gap-1.5 overflow-x-auto">
           {allAgents.length > 0 && allAgents.map((agent) => {
             const iconKey = `${gatewayId}:${agent}`;
             const icon = agentIcons?.[iconKey] || "🤖";
@@ -272,17 +267,12 @@ export function ChatArea({
           })}
         </div>
 
-        {showChat && <UsageHeatmap gatewayId={gatewayId} />}
-
-        <button
-          onClick={onToggleTaskPanel}
-          className={`flex h-7 w-7 items-center justify-center rounded-md text-text-tertiary transition-colors hover:bg-bg-hover hover:text-text-secondary ${
-            !taskPanelOpen ? "bg-bg-elevated text-text-secondary ring-1 ring-border-default" : ""
-          }`}
-          title={taskPanelOpen ? "Collapse tasks" : "Expand tasks"}
-        >
-          <IconChevronRight size={14} className={taskPanelOpen ? "" : "rotate-180"} />
-        </button>
+        {/* Usage heatmap — centered */}
+        {showChat && (
+          <div className="flex min-w-0 flex-1 items-center justify-center">
+            <UsageHeatmap gatewayId={gatewayId} />
+          </div>
+        )}
       </div>
 
       {/* Agent context menu (right-click / double-click) */}
@@ -382,10 +372,65 @@ export function ChatArea({
         />
       </div>
       {configured && (
-        <div className={`flex min-h-0 flex-1 flex-col ${showChat ? "" : "hidden"}`}>
+        <SplitPane showChat={showChat}>
           <ChatView rootDir={rootDir} serviceState={serviceState} lastError={lastError} startProgress={startProgress} hidden={hidden} gatewayId={gatewayId} gatewayName={gatewayName} gatewayEmoji={gatewayEmoji} onBusyChange={onBusyChange} securityOfficerId={securityOfficerId} agents={agents} agentIcons={agentIcons} onRunningAgentsChange={setRunningAgents} onDiscoveredAgentsChange={setDiscoveredAgents} />
-        </div>
+        </SplitPane>
       )}
+    </div>
+  );
+}
+
+/** Dual-column split pane: left = children (chat), right = A2UI placeholder */
+function SplitPane({ showChat, children }: { showChat: boolean; children: React.ReactNode }) {
+  const [leftRatio, setLeftRatio] = useState(0.5);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const dragging = useRef(false);
+
+  const handleMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    dragging.current = true;
+
+    const onMouseMove = (ev: MouseEvent) => {
+      if (!dragging.current || !containerRef.current) return;
+      const rect = containerRef.current.getBoundingClientRect();
+      const ratio = (ev.clientX - rect.left) / rect.width;
+      setLeftRatio(Math.max(0.2, Math.min(0.8, ratio)));
+    };
+
+    const onMouseUp = () => {
+      dragging.current = false;
+      document.removeEventListener("mousemove", onMouseMove);
+      document.removeEventListener("mouseup", onMouseUp);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    };
+
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    document.addEventListener("mousemove", onMouseMove);
+    document.addEventListener("mouseup", onMouseUp);
+  }, []);
+
+  return (
+    <div
+      ref={containerRef}
+      className={`flex min-h-0 flex-1 ${showChat ? "" : "hidden"}`}
+    >
+      {/* Left column: Chat */}
+      <div className="flex min-h-0 flex-col" style={{ width: `${leftRatio * 100}%` }}>
+        {children}
+      </div>
+
+      {/* Drag handle */}
+      <div
+        className="w-1 shrink-0 cursor-col-resize bg-border-subtle transition-colors hover:bg-accent-emerald/30"
+        onMouseDown={handleMouseDown}
+      />
+
+      {/* Right column: A2UI placeholder */}
+      <div className="flex min-h-0 flex-1 flex-col items-center justify-center bg-bg-deep">
+        <p className="text-[12px] text-text-ghost">A2UI</p>
+      </div>
     </div>
   );
 }
