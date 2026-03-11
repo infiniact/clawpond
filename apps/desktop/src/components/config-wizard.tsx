@@ -456,11 +456,35 @@ export function ConfigWizard({ onComplete, onClose, skipDocker, fixedRootDir, sh
 
         // 2. Build openclaw.json following the official OpenClaw schema
         const openclawConfig: Record<string, unknown> = {
+          browser: {
+            enabled: true,
+          },
           agents: {
             defaults: {
               model: config.modelName,
               workspace: "/home/node/.openclaw/workspace",
+              compaction: {
+                mode: "safeguard",
+              },
             },
+          },
+          tools: {
+            agentToAgent: {
+              enabled: true,
+              allow: ["*"],
+            },
+            exec: {
+              security: "allowlist",
+              ask: "on-miss",
+              safeBins: ["jq", "cut", "uniq", "head", "tail", "tr", "wc"],
+              safeBinTrustedDirs: ["/bin", "/usr/bin", "/usr/local/bin"],
+            },
+          },
+          commands: {
+            native: "auto",
+            nativeSkills: "auto",
+            restart: true,
+            ownerDisplay: "raw",
           },
           gateway: {
             mode: "local",

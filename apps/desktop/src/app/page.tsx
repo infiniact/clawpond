@@ -7,6 +7,7 @@ import { TaskPanel } from "../components/task-panel";
 import { TopBar } from "../components/top-bar";
 import { IconPlay, IconStop, IconSettings, IconX, IconGlobe, IconPlus, IconSearch, IconCpu, IconHash, IconFolder, IconDownload, IconCheck, IconSpinner, IconXCircle, IconArrowRight, IconShield, IconSun, IconMoon } from "../components/icons";
 import { QuickModelConfig, QuickChannelsConfig } from "../components/quick-config";
+import { UpdateChecker } from "../components/update-checker";
 import { RpcPoolProvider } from "../lib/rpc-pool-context";
 import { EMOJI_OPTIONS, FEATURED_COUNT } from "../lib/emoji-data";
 import type { GatewayInfo } from "../lib/rpc-pool";
@@ -107,6 +108,7 @@ export default function Home() {
   const [quickConfig, setQuickConfig] = useState<"model" | "channels" | null>(null);
   const [deleteConfirm, setDeleteConfirm] = useState<{ gatewayId: string; name: string; rootDir: string | null } | null>(null);
   const [settingsModal, setSettingsModal] = useState(false);
+  const [updateModal, setUpdateModal] = useState(false);
   const [sharedDir, setSharedDir] = useState(() => {
     try { return localStorage.getItem(SHARED_DIR_STORAGE_KEY) || ""; } catch { return ""; }
   });
@@ -814,6 +816,16 @@ export default function Home() {
               </span>
             </div>
 
+            <div className="mb-4">
+              <button
+                onClick={() => { setSettingsModal(false); setUpdateModal(true); }}
+                className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-bg-elevated px-3 py-2.5 text-[12px] font-medium text-text-primary ring-1 ring-border-default transition-colors hover:bg-bg-hover"
+              >
+                <IconDownload size={14} className="text-accent-emerald" />
+                Check for Updates
+              </button>
+            </div>
+
             <div className="flex justify-end gap-2">
               <button
                 onClick={() => setSettingsModal(false)}
@@ -834,6 +846,11 @@ export default function Home() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* ── Update Checker Modal ── */}
+      {updateModal && (
+        <UpdateChecker onClose={() => setUpdateModal(false)} />
       )}
     </div>
     </RpcPoolProvider>
