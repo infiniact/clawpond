@@ -7,18 +7,18 @@ import { IconSettings, IconSun, IconMoon } from "./icons";
 function WindowControls() {
   const handleMinimize = useCallback(async () => {
     const { getCurrentWindow } = await import("@tauri-apps/api/window");
-    getCurrentWindow().minimize();
+    await getCurrentWindow().minimize();
   }, []);
 
   const handleMaximize = useCallback(async () => {
     const win = (await import("@tauri-apps/api/window")).getCurrentWindow();
     const maximized = await win.isMaximized();
-    if (maximized) win.unmaximize(); else win.maximize();
+    if (maximized) await win.unmaximize(); else await win.maximize();
   }, []);
 
   const handleClose = useCallback(async () => {
     const { getCurrentWindow } = await import("@tauri-apps/api/window");
-    getCurrentWindow().close();
+    await getCurrentWindow().close();
   }, []);
 
   return (
@@ -75,7 +75,7 @@ export function TopBar({ onSettings, theme, onToggleTheme }: { onSettings?: () =
   return (
     <header className="flex h-11 shrink-0 items-center border-b border-border-subtle bg-bg-deep">
       {/* Left: branding */}
-      <div className="flex items-center gap-2.5 px-4" data-tauri-drag-region="">
+      <div className="flex items-center gap-2.5 px-4" {...(isWindows ? { "data-tauri-drag-region": "" } : {})}>
         <Image
           src={theme === "light" ? "/logo-light.svg" : "/logo-dark.svg"}
           alt="ClawPond"
@@ -89,8 +89,8 @@ export function TopBar({ onSettings, theme, onToggleTheme }: { onSettings?: () =
         </span>
       </div>
 
-      {/* Center: drag region (fills remaining space) */}
-      <div className="flex-1 h-full" data-tauri-drag-region="" />
+      {/* Center: drag region — only on Windows where native decorations are disabled */}
+      <div className="flex-1 h-full" {...(isWindows ? { "data-tauri-drag-region": "" } : {})} />
 
       {/* Right: theme toggle + settings */}
       <div className="flex items-center gap-2 px-2">
