@@ -8,7 +8,7 @@ import {
   IconCpu,
   IconHash,
   IconChevronDown,
-} from "./icons";
+} from "../icons";
 import { PROVIDERS, CHANNELS, type ChannelConfig } from "./config-wizard";
 
 /* ── Model Quick Config Modal ── */
@@ -45,7 +45,12 @@ export function QuickModelConfig({
         const cfg = await invoke<Record<string, unknown>>("read_openclaw_config", { rootDir });
         const agents = cfg?.agents as Record<string, unknown> | undefined;
         const defaults = agents?.defaults as Record<string, unknown> | undefined;
-        const currentModel = (defaults?.model as string) || "";
+        const rawModel = defaults?.model;
+        const currentModel = typeof rawModel === "string"
+          ? rawModel
+          : typeof rawModel === "object" && rawModel !== null
+            ? (rawModel as Record<string, unknown>).primary as string || (rawModel as Record<string, unknown>).id as string || ""
+            : "";
         setModelName(currentModel);
 
         // Derive provider from model prefix

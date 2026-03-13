@@ -132,7 +132,6 @@ pub fn write_compose_config(
     config_dir: String,
     workspace_dir: String,
     gateway_port: String,
-    bridge_port: String,
     gateway_bind: String,
     gateway_token: String,
     provider_env_key: String,
@@ -155,7 +154,6 @@ pub fn write_compose_config(
             config_dir: cfg_expanded,
             workspace_dir: ws_expanded,
             gateway_port,
-            bridge_port,
             gateway_bind,
             gateway_token,
             provider_env_key,
@@ -218,27 +216,23 @@ pub fn read_gateway_info(root_dir: String) -> Result<GatewayInfo, String> {
         .map_err(|e| format!("Failed to read .env: {}", e))?;
 
     let mut port = "18789".to_string();
-    let mut bridge_port = "18790".to_string();
     let mut token = String::new();
 
     for line in content.lines() {
         let line = line.trim();
         if let Some(val) = line.strip_prefix("OPENCLAW_GATEWAY_PORT=") {
             port = val.to_string();
-        } else if let Some(val) = line.strip_prefix("OPENCLAW_BRIDGE_PORT=") {
-            bridge_port = val.to_string();
         } else if let Some(val) = line.strip_prefix("OPENCLAW_GATEWAY_TOKEN=") {
             token = val.to_string();
         }
     }
 
-    Ok(GatewayInfo { port, bridge_port, token })
+    Ok(GatewayInfo { port, token })
 }
 
 #[derive(Serialize)]
 pub struct GatewayInfo {
     pub port: String,
-    pub bridge_port: String,
     pub token: String,
 }
 
@@ -259,8 +253,6 @@ pub fn read_existing_config(root_dir: String) -> Result<ExistingConfig, String> 
                 result.image = Some(val.to_string());
             } else if let Some(val) = line.strip_prefix("OPENCLAW_GATEWAY_PORT=") {
                 result.gateway_port = Some(val.to_string());
-            } else if let Some(val) = line.strip_prefix("OPENCLAW_BRIDGE_PORT=") {
-                result.bridge_port = Some(val.to_string());
             } else if let Some(val) = line.strip_prefix("OPENCLAW_GATEWAY_BIND=") {
                 result.gateway_bind = Some(val.to_string());
             }
@@ -290,7 +282,6 @@ pub fn read_existing_config(root_dir: String) -> Result<ExistingConfig, String> 
 pub struct ExistingConfig {
     pub image: Option<String>,
     pub gateway_port: Option<String>,
-    pub bridge_port: Option<String>,
     pub gateway_bind: Option<String>,
     pub model_name: Option<String>,
     pub channels: Option<serde_json::Value>,
@@ -348,11 +339,11 @@ pub async fn migrate_gateway_compose(root_dir: String) -> Result<bool, String> {
 }
 
 #[tauri::command]
-pub async fn browser_start(cdp_port: String, app: AppHandle) -> Result<(), String> {
+pub async fn browser_start(relay_port: String, image: String, app: AppHandle) -> Result<(), String> {
     let browser_dir = shellexpand::tilde("~/clawpond/browser").to_string();
     tauri::async_runtime::spawn_blocking(move || {
         let dir = std::path::Path::new(&browser_dir);
-        clawking::write_browser_compose(dir, &cdp_port)?;
+        clawking::write_browser_compose(dir, &relay_port, &image)?;
         let _ = app.emit("browser-progress", "Starting shared browser...");
         clawking::browser_up(dir)
     })
@@ -378,6 +369,25 @@ pub async fn browser_health() -> bool {
     })
     .await
     .unwrap_or(false)
+}
+
+#[tauri::command]
+pub async fn resolve_playwright_image() -> String {
+    tauri::async_runtime::spawn_blocking(clawking::resolve_playwright_image)
+        .await
+        .unwrap_or_else(|_| "mcr.microsoft.com/playwright:v1.52.0-noble".to_string())
+}
+
+#[tauri::command]
+pub async fn check_image_update(image: String) -> clawking::ImageUpdateInfo {
+    tauri::async_runtime::spawn_blocking(move || clawking::check_image_update(&image))
+        .await
+        .unwrap_or_else(|_| clawking::ImageUpdateInfo {
+            installed: false,
+            local_digest: None,
+            remote_digest: None,
+            needs_update: false,
+        })
 }
 
 #[tauri::command]

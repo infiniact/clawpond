@@ -13,3 +13,4 @@ serde_json.workspace = true
 log.workspace = true
 thiserror.workspace = true
 ureq = { version = "3", features = ["json"] }
+regex = "1"

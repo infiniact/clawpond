@@ -1,8 +1,8 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
-import { useRpcPool } from "../lib/rpc-pool-context";
-import { getDailyUsage, getTodayHourlyUsage, type DayUsage, type HourUsage } from "../lib/usage-store";
+import { useRpcPool } from "../lib/rpc/rpc-pool-context";
+import { getDailyUsage, getTodayHourlyUsage, type DayUsage, type HourUsage } from "../lib/stores/usage-store";
 
 const DAILY_TOKEN_MAX = 100_000_000;  // 1亿 tokens = full red (daily)
 const HOURLY_TOKEN_MAX = 10_000_000;  // 1000万 tokens = full red (hourly)

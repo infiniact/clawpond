@@ -2,7 +2,7 @@
  * Mention parsing utilities for @ mentions in chat messages.
  */
 
-import type { GatewayInfo } from "./rpc-pool";
+import type { GatewayInfo } from "./rpc/rpc-pool";
 
 /**
  * Parse @GatewayName mentions from text and return matching gateway IDs.

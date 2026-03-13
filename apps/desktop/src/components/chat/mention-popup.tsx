@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from "react";
-import type { GatewayInfo } from "../lib/rpc-pool";
+import type { GatewayInfo } from "../../lib/rpc/rpc-pool";
 
 export function MentionPopup({
   query,

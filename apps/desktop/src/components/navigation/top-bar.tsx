@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import Image from "next/image";
-import { IconSettings, IconSun, IconMoon } from "./icons";
+import { IconSettings, IconSun, IconMoon } from "../icons";
 
 function WindowControls() {
   const handleMinimize = useCallback(async () => {

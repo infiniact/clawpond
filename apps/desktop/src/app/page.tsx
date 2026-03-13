@@ -1,102 +1,42 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef } from "react";
-import { Sidebar, type GatewayItem } from "../components/sidebar";
-import { ChatArea } from "../components/chat-area";
+import { Sidebar, type GatewayItem } from "../components/navigation/sidebar";
+import { ChatArea } from "../components/chat/chat-area";
 import { TaskPanel } from "../components/task-panel";
-import { TopBar } from "../components/top-bar";
-import { IconPlay, IconStop, IconSettings, IconX, IconGlobe, IconPlus, IconSearch, IconCpu, IconHash, IconFolder, IconDownload, IconCheck, IconSpinner, IconXCircle, IconArrowRight, IconShield, IconSun, IconMoon } from "../components/icons";
-import { QuickModelConfig, QuickChannelsConfig } from "../components/quick-config";
-import { UpdateChecker } from "../components/update-checker";
-import { RpcPoolProvider } from "../lib/rpc-pool-context";
-import { EMOJI_OPTIONS, FEATURED_COUNT } from "../lib/emoji-data";
-import type { GatewayInfo } from "../lib/rpc-pool";
+import { TopBar } from "../components/navigation/top-bar";
+import { QuickModelConfig, QuickChannelsConfig } from "../components/config/quick-config";
+import { UpdateChecker } from "../components/modals/update-checker";
+import { AddGatewayModal } from "../components/modals/add-gateway-modal";
+import { DeleteGatewayModal } from "../components/modals/delete-gateway-modal";
+import { SettingsModal } from "../components/modals/settings-modal";
+import { GatewayContextMenu } from "../components/navigation/gateway-context-menu";
+import { RpcPoolProvider } from "../lib/rpc/rpc-pool-context";
+import type { GatewayInfo } from "../lib/rpc/rpc-pool";
 import { openUrlInWindow } from "../lib/open-url";
+import {
+  type Gateway,
+  type ServiceState,
+  type ComposeStartProgress,
+  loadGateways,
+  saveGateways,
+  loadAgentIcons,
+  saveAgentIcons,
+} from "../lib/stores/gateway-store";
+import {
+  SHARED_DIR_STORAGE_KEY,
+  THEME_STORAGE_KEY,
+  SECURITY_OFFICER_STORAGE_KEY,
+  PLAYWRIGHT_IMAGE_FALLBACK,
+  loadSharedDir,
+  loadTheme,
+  saveTheme,
+  loadSecurityOfficer,
+  saveSecurityOfficer,
+} from "../lib/stores/settings-store";
 
-export type ServiceState = "unconfigured" | "loading" | "starting" | "stopping" | "running" | "error" | "stopped";
-
-export type ComposeStartProgress = {
-  stage: string;
-  message: string;
-  image: string | null;
-  percent: number | null;
-  layers_done: number;
-  layers_total: number;
-};
-
-export type Gateway = {
-  id: string;
-  name: string;
-  emoji: string;
-  type: "docker";
-  rootDir: string | null;
-  configured: boolean;
-  serviceState: ServiceState;
-  cpuPercent?: number;
-  memUsageMb?: number;
-  busy?: boolean;
-  lastError?: string;
-  startProgress?: ComposeStartProgress;
-};
-
-/** Persisted gateway shape (no runtime state like serviceState) */
-type StoredGateway = {
-  id: string;
-  name: string;
-  emoji: string;
-  type: "docker";
-  rootDir: string | null;
-  configured: boolean;
-};
-
-const GATEWAYS_STORAGE_KEY = "clawpond-gateways";
-const SHARED_DIR_STORAGE_KEY = "clawpond-shared-dir";
-const BROWSER_CDP_PORT = "18790";
-const THEME_STORAGE_KEY = "clawpond-theme";
-const SECURITY_OFFICER_STORAGE_KEY = "clawpond-security-officer";
-const AGENT_ICONS_STORAGE_KEY = "clawpond-agent-icons";
-
-function loadAgentIcons(): Record<string, string> {
-  try {
-    const raw = localStorage.getItem(AGENT_ICONS_STORAGE_KEY);
-    if (raw) return JSON.parse(raw);
-  } catch { /* ignore */ }
-  return {};
-}
-
-function saveAgentIcons(icons: Record<string, string>) {
-  localStorage.setItem(AGENT_ICONS_STORAGE_KEY, JSON.stringify(icons));
-}
-
-function loadGateways(): Gateway[] {
-  try {
-    const raw = localStorage.getItem(GATEWAYS_STORAGE_KEY);
-    if (raw) {
-      const stored: StoredGateway[] = JSON.parse(raw);
-      if (Array.isArray(stored) && stored.length > 0) {
-        return stored.map((g) => ({
-          ...g,
-          type: "docker" as const,
-          serviceState: !g.configured
-            ? "unconfigured" as const
-            : "loading" as const,
-        }));
-      }
-    }
-  } catch { /* ignore */ }
-  return [
-    { id: "default", name: "ClawKing", emoji: "\u{1F99E}", type: "docker", rootDir: null, configured: false, serviceState: "unconfigured" },
-  ];
-}
-
-function saveGateways(gateways: Gateway[]) {
-  const stored: StoredGateway[] = gateways.map(({ id, name, emoji, rootDir, configured }) => ({
-    id, name, emoji, type: "docker", rootDir, configured,
-  }));
-  localStorage.setItem(GATEWAYS_STORAGE_KEY, JSON.stringify(stored));
-}
-
-// Emoji data imported from ../lib/emoji-data
+// Re-export types for backwards compatibility with any external references
+export type { ServiceState, ComposeStartProgress } from "../lib/stores/gateway-store";
 
 export default function Home() {
   const [gateways, setGateways] = useState<Gateway[]>(loadGateways);
@@ -109,17 +49,12 @@ export default function Home() {
   const [deleteConfirm, setDeleteConfirm] = useState<{ gatewayId: string; name: string; rootDir: string | null } | null>(null);
   const [settingsModal, setSettingsModal] = useState(false);
   const [updateModal, setUpdateModal] = useState(false);
-  const [sharedDir, setSharedDir] = useState(() => {
-    try { return localStorage.getItem(SHARED_DIR_STORAGE_KEY) || ""; } catch { return ""; }
-  });
+  const [sharedDir, setSharedDir] = useState(loadSharedDir);
   const [settingsDraft, setSettingsDraft] = useState("");
   const [browserRunning, setBrowserRunning] = useState(false);
-  const [theme, setTheme] = useState<"dark" | "light">(() => {
-    try { return (localStorage.getItem(THEME_STORAGE_KEY) as "dark" | "light") || "dark"; } catch { return "dark"; }
-  });
-  const [securityOfficerId, setSecurityOfficerId] = useState<string | null>(() => {
-    try { return localStorage.getItem(SECURITY_OFFICER_STORAGE_KEY) || null; } catch { return null; }
-  });
+  const [playwrightImage, setPlaywrightImage] = useState(PLAYWRIGHT_IMAGE_FALLBACK);
+  const [theme, setTheme] = useState<"dark" | "light">(loadTheme);
+  const [securityOfficerId, setSecurityOfficerId] = useState<string | null>(loadSecurityOfficer);
 
   // Agent state: per-gateway agent lists (agents in list + allowed subagents) and cached emoji icons
   const [gatewayAgents, setGatewayAgents] = useState<Record<string, { agents: string[]; allowed: string[] }>>({});
@@ -141,16 +76,16 @@ export default function Home() {
   function toggleTheme() {
     const next = theme === "dark" ? "light" : "dark";
     setTheme(next);
-    localStorage.setItem(THEME_STORAGE_KEY, next);
+    saveTheme(next);
   }
 
   function toggleSecurityOfficer(gatewayId: string) {
     if (securityOfficerId === gatewayId) {
       setSecurityOfficerId(null);
-      localStorage.removeItem(SECURITY_OFFICER_STORAGE_KEY);
+      saveSecurityOfficer(null);
     } else {
       setSecurityOfficerId(gatewayId);
-      localStorage.setItem(SECURITY_OFFICER_STORAGE_KEY, gatewayId);
+      saveSecurityOfficer(gatewayId);
     }
   }
 
@@ -163,7 +98,6 @@ export default function Home() {
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; gatewayId: string } | null>(null);
   const [ctxEndpoint, setCtxEndpoint] = useState<string | null>(null);
   const [ctxCdpEndpoint, setCtxCdpEndpoint] = useState<string | null>(null);
-  const ctxRef = useRef<HTMLDivElement>(null);
 
   const activeGateway = gateways.find((g) => g.id === activeGatewayId) || gateways[0];
 
@@ -189,10 +123,11 @@ export default function Home() {
       setCtxEndpoint(null);
       setCtxCdpEndpoint(null);
       import("@tauri-apps/api/core").then(({ invoke }) =>
-        invoke<{ port: string; bridge_port: string; token: string }>("read_gateway_info", { rootDir: gw.rootDir })
+        invoke<{ port: string; token: string }>("read_gateway_info", { rootDir: gw.rootDir })
           .then((info) => {
             setCtxEndpoint(`127.0.0.1:${info.port}`);
-            setCtxCdpEndpoint(`127.0.0.1:${BROWSER_CDP_PORT}`);
+            const relayPort = parseInt(info.port, 10) + 3;
+            setCtxCdpEndpoint(`127.0.0.1:${relayPort}`);
           })
           .catch(() => { setCtxEndpoint(null); setCtxCdpEndpoint(null); })
       );
@@ -201,28 +136,6 @@ export default function Home() {
       setCtxCdpEndpoint(null);
     }
   }, [gateways]);
-
-  // Close context menu on click outside
-  useEffect(() => {
-    if (!ctxMenu) return;
-    const handler = (e: MouseEvent) => {
-      if (ctxRef.current && !ctxRef.current.contains(e.target as Node)) {
-        setCtxMenu(null);
-      }
-    };
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
-  }, [ctxMenu]);
-
-  // Close context menu on Escape
-  useEffect(() => {
-    if (!ctxMenu) return;
-    const handler = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setCtxMenu(null);
-    };
-    document.addEventListener("keydown", handler);
-    return () => document.removeEventListener("keydown", handler);
-  }, [ctxMenu]);
 
   async function ctxAction(action: string) {
     if (!ctxMenu) return;
@@ -274,7 +187,9 @@ export default function Home() {
         try {
           // Auto-start global shared browser if not running
           if (!browserRunning) {
-            await invoke("browser_start", { cdpPort: BROWSER_CDP_PORT }).catch(() => {});
+            const gwInfo = await invoke<{ port: string; token: string }>("read_gateway_info", { rootDir });
+            const relayPort = String(parseInt(gwInfo.port, 10) + 3);
+            await invoke("browser_start", { relayPort, image: playwrightImageRef.current }).catch(() => {});
             setBrowserRunning(true);
           }
           const { listen } = await import("@tauri-apps/api/event");
@@ -337,6 +252,12 @@ export default function Home() {
       try {
         const running = await invoke<boolean>("browser_health");
         if (!cancelled) setBrowserRunning(running);
+      } catch { /* ignore */ }
+
+      // Resolve latest Playwright image
+      try {
+        const resolved = await invoke<string>("resolve_playwright_image");
+        if (!cancelled && resolved) setPlaywrightImage(resolved);
       } catch { /* ignore */ }
 
       if (cancelled) return;
@@ -414,6 +335,8 @@ export default function Home() {
   activeGatewayRef.current = activeGateway;
   const activeGatewayIdRef = useRef(activeGatewayId);
   activeGatewayIdRef.current = activeGatewayId;
+  const playwrightImageRef = useRef(playwrightImage);
+  playwrightImageRef.current = playwrightImage;
 
   // Poll service health for active gateway — guarded and non-reactive
   const checkHealth = useCallback(async () => {
@@ -480,7 +403,9 @@ export default function Home() {
               // Auto-start global shared browser if not running
               const running = await invoke<boolean>("browser_health");
               if (!running) {
-                await invoke("browser_start", { cdpPort: BROWSER_CDP_PORT }).catch(() => {});
+                const gwInfo = await invoke<{ port: string; token: string }>("read_gateway_info", { rootDir });
+                const relayPort = String(parseInt(gwInfo.port, 10) + 3);
+                await invoke("browser_start", { relayPort, image: playwrightImageRef.current }).catch(() => {});
                 setBrowserRunning(true);
               }
               unlistenProgress = await listen<ComposeStartProgress>("compose-start-progress", (ev) => {
@@ -540,12 +465,11 @@ export default function Home() {
     }
     if (securityOfficerId === gatewayId) {
       setSecurityOfficerId(null);
-      localStorage.removeItem(SECURITY_OFFICER_STORAGE_KEY);
+      saveSecurityOfficer(null);
     }
     setDeleteConfirm(null);
   }
 
-  const isDefaultGateway = activeGatewayId === "default";
   const sidebarGateways: GatewayItem[] = gateways.map((g) => ({
     id: g.id,
     name: g.name,
@@ -634,112 +558,17 @@ export default function Home() {
       </div>
 
       {/* Custom context menu — scoped to the right-clicked gateway */}
-      {ctxMenu && (() => {
-        const ctxGw = gateways.find((g) => g.id === ctxMenu.gatewayId);
-        if (!ctxGw) return null;
-        return (
-        <div
-          ref={ctxRef}
-          className="fixed z-[999] min-w-[180px] overflow-hidden rounded-lg bg-bg-surface py-1 shadow-xl ring-1 ring-border-default"
-          style={{ left: ctxMenu.x, top: ctxMenu.y }}
-        >
-          {/* Gateway name header */}
-          <div className="px-3 py-1.5 text-[11px] font-medium text-text-ghost">
-            {ctxGw.emoji} {ctxGw.name}
-          </div>
-          {ctxEndpoint && (
-            <div className="px-3 pb-1 text-[10px] font-mono text-text-ghost/70">
-              API {ctxEndpoint}
-            </div>
-          )}
-          {ctxCdpEndpoint && (
-            <div className="px-3 pb-1 text-[10px] font-mono text-text-ghost/70">
-              CDP {ctxCdpEndpoint}
-            </div>
-          )}
-          <div className="my-0.5 h-px bg-border-subtle" />
-          <button
-            onClick={() => ctxAction("start")}
-            disabled={!ctxGw.configured || ctxGw.serviceState === "running" || ctxGw.serviceState === "starting" || ctxGw.serviceState === "stopping"}
-            className="flex w-full items-center gap-2.5 px-3 py-2 text-left text-[12px] text-text-primary transition-colors hover:bg-bg-hover disabled:opacity-40"
-          >
-            <IconPlay size={14} className="shrink-0 text-accent-emerald" />
-            Start Gateway
-          </button>
-          <button
-            onClick={() => ctxAction("stop")}
-            disabled={!ctxGw.configured || ctxGw.serviceState === "stopped" || ctxGw.serviceState === "unconfigured" || ctxGw.serviceState === "starting" || ctxGw.serviceState === "stopping"}
-            className="flex w-full items-center gap-2.5 px-3 py-2 text-left text-[12px] text-text-primary transition-colors hover:bg-bg-hover disabled:opacity-40"
-          >
-            <IconStop size={14} className="shrink-0 text-accent-red" />
-            Stop Gateway
-          </button>
-          <button
-            onClick={() => ctxAction("open-gateway")}
-            disabled={!ctxGw.configured || ctxGw.serviceState !== "running"}
-            className="flex w-full items-center gap-2.5 px-3 py-2 text-left text-[12px] text-text-primary transition-colors hover:bg-bg-hover disabled:opacity-40"
-          >
-            <IconGlobe size={14} className="shrink-0 text-accent-emerald" />
-            Connect Gateway
-          </button>
-          <div className="my-1 h-px bg-border-subtle" />
-          <button
-            onClick={() => ctxAction("config-model")}
-            disabled={!ctxGw.configured}
-            className="flex w-full items-center gap-2.5 px-3 py-2 text-left text-[12px] text-text-primary transition-colors hover:bg-bg-hover disabled:opacity-40"
-          >
-            <IconCpu size={14} className="shrink-0 text-text-tertiary" />
-            Model Config...
-          </button>
-          <button
-            onClick={() => ctxAction("config-channels")}
-            disabled={!ctxGw.configured}
-            className="flex w-full items-center gap-2.5 px-3 py-2 text-left text-[12px] text-text-primary transition-colors hover:bg-bg-hover disabled:opacity-40"
-          >
-            <IconHash size={14} className="shrink-0 text-text-tertiary" />
-            Channel Config...
-          </button>
-          <div className="my-1 h-px bg-border-subtle" />
-          <button
-            onClick={() => ctxAction("security-officer")}
-            disabled={!ctxGw.configured || (securityOfficerId !== null && securityOfficerId !== ctxGw.id)}
-            className="flex w-full items-center gap-2.5 px-3 py-2 text-left text-[12px] text-text-primary transition-colors hover:bg-bg-hover disabled:opacity-40"
-          >
-            <IconShield size={14} className={`shrink-0 ${securityOfficerId === ctxGw.id ? "text-accent-amber" : "text-text-tertiary"}`} />
-            {securityOfficerId === ctxGw.id ? "Remove Security Officer" : "Set as Security Officer"}
-          </button>
-          <div className="my-1 h-px bg-border-subtle" />
-          <button
-            onClick={() => ctxAction("reconfigure")}
-            disabled={!ctxGw.configured}
-            className="flex w-full items-center gap-2.5 px-3 py-2 text-left text-[12px] text-text-primary transition-colors hover:bg-bg-hover disabled:opacity-40"
-          >
-            <IconSettings size={14} className="shrink-0 text-text-tertiary" />
-            Reconfigure...
-          </button>
-          {ctxGw.id !== "default" && (
-            <>
-              <div className="my-1 h-px bg-border-subtle" />
-              <button
-                onClick={() => ctxAction("delete")}
-                className="flex w-full items-center gap-2.5 px-3 py-2 text-left text-[12px] text-accent-red transition-colors hover:bg-accent-red/10"
-              >
-                <IconXCircle size={14} className="shrink-0 text-accent-red" />
-                Delete Gateway
-              </button>
-            </>
-          )}
-          <div className="my-1 h-px bg-border-subtle" />
-          <button
-            onClick={() => setCtxMenu(null)}
-            className="flex w-full items-center gap-2.5 px-3 py-2 text-left text-[12px] text-text-tertiary transition-colors hover:bg-bg-hover"
-          >
-            <IconX size={14} className="shrink-0" />
-            Close
-          </button>
-        </div>
-        );
-      })()}
+      {ctxMenu && (
+        <GatewayContextMenu
+          ctxMenu={ctxMenu}
+          ctxEndpoint={ctxEndpoint}
+          ctxCdpEndpoint={ctxCdpEndpoint}
+          gateways={gateways}
+          securityOfficerId={securityOfficerId}
+          onAction={ctxAction}
+          onClose={() => setCtxMenu(null)}
+        />
+      )}
 
       {/* Add Gateway Modal */}
       {addGatewayModal && (
@@ -780,72 +609,18 @@ export default function Home() {
 
       {/* ── Settings Modal ── */}
       {settingsModal && (
-        <div className="fixed inset-0 z-[1000] flex items-center justify-center bg-black/60 backdrop-blur-sm">
-          <div className="w-full max-w-md rounded-xl bg-bg-surface p-6 shadow-2xl ring-1 ring-border-default">
-            <div className="mb-4 flex items-center justify-between">
-              <h2 className="text-[14px] font-semibold text-text-primary">Global Settings</h2>
-              <button onClick={() => setSettingsModal(false)} className="text-text-ghost hover:text-text-secondary">
-                <IconX size={16} />
-              </button>
-            </div>
-
-            <label className="mb-1.5 block text-[12px] font-medium text-text-secondary">
-              Shared Directory
-            </label>
-            <p className="mb-2 text-[11px] text-text-ghost">
-              A host directory mounted into all Docker gateways at <code className="rounded bg-bg-elevated px-1 py-0.5 font-mono text-[10px]">/home/node/.openclaw/shared</code>. Leave empty to disable.
-            </p>
-            <input
-              type="text"
-              value={settingsDraft}
-              onChange={(e) => setSettingsDraft(e.target.value)}
-              placeholder="~/clawpond/shared"
-              className="mb-4 w-full rounded-lg border border-border-default bg-bg-deep px-3 py-2 text-[12px] text-text-primary placeholder:text-text-ghost focus:border-accent-blue focus:outline-none"
-            />
-
-            <label className="mb-1.5 block text-[12px] font-medium text-text-secondary">
-              Shared Browser
-            </label>
-            <p className="mb-2 text-[11px] text-text-ghost">
-              All gateways share a Playwright browser container via Docker network <code className="rounded bg-bg-elevated px-1 py-0.5 font-mono text-[10px]">clawpond-shared</code>. CDP available at <code className="rounded bg-bg-elevated px-1 py-0.5 font-mono text-[10px]">127.0.0.1:{BROWSER_CDP_PORT}</code>.
-            </p>
-            <div className="mb-4 flex items-center gap-2 rounded-lg bg-bg-elevated px-3 py-2.5 ring-1 ring-border-default">
-              <span className={`inline-block h-2 w-2 rounded-full ${browserRunning ? "bg-accent-emerald" : "bg-text-ghost"}`} />
-              <span className="text-[12px] font-medium text-text-primary">
-                {browserRunning ? "Browser Running" : "Browser Stopped"}
-              </span>
-            </div>
-
-            <div className="mb-4">
-              <button
-                onClick={() => { setSettingsModal(false); setUpdateModal(true); }}
-                className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-bg-elevated px-3 py-2.5 text-[12px] font-medium text-text-primary ring-1 ring-border-default transition-colors hover:bg-bg-hover"
-              >
-                <IconDownload size={14} className="text-accent-emerald" />
-                Check for Updates
-              </button>
-            </div>
-
-            <div className="flex justify-end gap-2">
-              <button
-                onClick={() => setSettingsModal(false)}
-                className="rounded-lg border border-border-default px-3 py-1.5 text-[12px] text-text-secondary hover:bg-bg-hover"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={async () => {
-                  setSharedDir(settingsDraft);
-                  localStorage.setItem(SHARED_DIR_STORAGE_KEY, settingsDraft);
-                  setSettingsModal(false);
-                }}
-                className="rounded-lg bg-accent-blue px-3 py-1.5 text-[12px] font-medium text-white hover:bg-accent-blue/90"
-              >
-                Save
-              </button>
-            </div>
-          </div>
-        </div>
+        <SettingsModal
+          settingsDraft={settingsDraft}
+          onSettingsDraftChange={setSettingsDraft}
+          browserRunning={browserRunning}
+          onSave={() => {
+            setSharedDir(settingsDraft);
+            localStorage.setItem(SHARED_DIR_STORAGE_KEY, settingsDraft);
+            setSettingsModal(false);
+          }}
+          onClose={() => setSettingsModal(false)}
+          onCheckUpdates={() => { setSettingsModal(false); setUpdateModal(true); }}
+        />
       )}
 
       {/* ── Update Checker Modal ── */}
@@ -854,215 +629,5 @@ export default function Home() {
       )}
     </div>
     </RpcPoolProvider>
-  );
-}
-
-/* ── Add Gateway Modal (docker only) ── */
-
-function AddGatewayModal({
-  onConfirm,
-  onCancel,
-  existingNames,
-}: {
-  onConfirm: (name: string, emoji: string) => void;
-  onCancel: () => void;
-  existingNames: string[];
-}) {
-  const [name, setName] = useState("");
-  const [emoji, setEmoji] = useState("\u{1F916}");
-  const [emojiSearch, setEmojiSearch] = useState("");
-  const [showAll, setShowAll] = useState(false);
-
-  const trimmed = name.trim();
-  const nameError = trimmed
-    ? existingNames.includes(trimmed.toLowerCase())
-      ? "Name already exists"
-      : /[^a-zA-Z0-9_-]/.test(trimmed)
-        ? "Only letters, numbers, - and _ allowed"
-        : null
-    : null;
-
-  const canConfirm = !!trimmed && !nameError;
-
-  const filtered = emojiSearch
-    ? EMOJI_OPTIONS.filter((e) =>
-        e.kw.toLowerCase().includes(emojiSearch.toLowerCase()) ||
-        e.emoji.includes(emojiSearch)
-      )
-    : showAll
-      ? EMOJI_OPTIONS
-      : EMOJI_OPTIONS.slice(0, FEATURED_COUNT);
-
-  function handleConfirm() {
-    if (!canConfirm) return;
-    onConfirm(trimmed, emoji);
-  }
-
-  return (
-    <div className="fixed inset-0 z-[1000] flex items-center justify-center bg-black/50 backdrop-blur-sm">
-      <div className="w-full max-w-sm rounded-xl bg-bg-surface p-5 shadow-2xl ring-1 ring-border-default">
-        <h3 className="mb-4 text-[14px] font-bold text-text-primary">
-          Add Docker Gateway
-        </h3>
-
-        {/* Name */}
-        <label className="mb-1 block text-[11px] font-medium text-text-secondary">Name</label>
-        <input
-          type="text"
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          placeholder="my-gateway"
-          autoFocus
-          className="mb-1 w-full rounded-lg bg-bg-elevated px-3 py-2 text-[12px] text-text-primary ring-1 ring-border-default placeholder:text-text-ghost focus:outline-none focus:ring-border-strong"
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && canConfirm) handleConfirm();
-            if (e.key === "Escape") onCancel();
-          }}
-        />
-        {nameError && <p className="mb-2 text-[10px] text-accent-red">{nameError}</p>}
-        {trimmed && !nameError && (
-          <p className="mb-2 text-[10px] text-text-ghost">
-            ~/clawpond/clawking/pond/{trimmed}
-          </p>
-        )}
-
-        {/* Icon picker */}
-        <label className="mb-1 block text-[11px] font-medium text-text-secondary">Icon</label>
-        <div className="mb-2 flex items-center gap-2">
-          <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-bg-elevated text-[20px] ring-1 ring-border-default">
-            {emoji}
-          </span>
-          <div className="flex flex-1 items-center gap-1.5 rounded-lg bg-bg-elevated px-2.5 py-1.5 ring-1 ring-border-default focus-within:ring-accent-emerald/50">
-            <IconSearch size={12} className="shrink-0 text-text-ghost" />
-            <input
-              type="text"
-              value={emojiSearch}
-              onChange={(e) => setEmojiSearch(e.target.value)}
-              placeholder="Search icons..."
-              className="w-full bg-transparent text-[11px] text-text-primary placeholder:text-text-ghost focus:outline-none"
-            />
-          </div>
-        </div>
-        <div className="mb-2 grid grid-cols-10 gap-1">
-          {filtered.map((e) => (
-            <button
-              key={e.emoji}
-              type="button"
-              onClick={() => setEmoji(e.emoji)}
-              className={`flex h-7 w-7 items-center justify-center rounded-md text-[14px] transition-all hover:bg-bg-hover ${
-                emoji === e.emoji ? "bg-accent-emerald/15 ring-1 ring-accent-emerald/30" : ""
-              }`}
-            >
-              {e.emoji}
-            </button>
-          ))}
-        </div>
-        {!emojiSearch && !showAll && EMOJI_OPTIONS.length > FEATURED_COUNT && (
-          <button
-            type="button"
-            onClick={() => setShowAll(true)}
-            className="mb-3 w-full text-center text-[11px] font-medium text-accent-emerald hover:underline"
-          >
-            Show more ({EMOJI_OPTIONS.length - FEATURED_COUNT} more)
-          </button>
-        )}
-        {emojiSearch && filtered.length === 0 && (
-          <p className="mb-3 text-center text-[11px] text-text-ghost">No matching icons</p>
-        )}
-
-        {/* Actions */}
-        <div className="mt-4 flex items-center justify-end gap-2">
-          <button
-            onClick={onCancel}
-            className="rounded-lg px-4 py-2 text-[12px] font-medium text-text-tertiary transition-colors hover:text-text-secondary"
-          >
-            Cancel
-          </button>
-          <button
-            onClick={handleConfirm}
-            disabled={!canConfirm}
-            className="inline-flex items-center gap-1.5 rounded-lg bg-accent-emerald/15 px-4 py-2 text-[12px] font-semibold text-accent-emerald ring-1 ring-accent-emerald/25 transition-all hover:bg-accent-emerald/25 disabled:opacity-40"
-          >
-            <IconPlus size={13} />
-            Create
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-/* ── Delete Gateway Confirmation Modal ── */
-
-function DeleteGatewayModal({
-  name,
-  hasFiles,
-  onConfirm,
-  onCancel,
-}: {
-  name: string;
-  hasFiles: boolean;
-  onConfirm: (deleteFiles: boolean) => void;
-  onCancel: () => void;
-}) {
-  const [deleteFiles, setDeleteFiles] = useState(false);
-  const [deleting, setDeleting] = useState(false);
-
-  async function handleConfirm() {
-    setDeleting(true);
-    await onConfirm(deleteFiles);
-  }
-
-  return (
-    <div className="fixed inset-0 z-[1000] flex items-center justify-center bg-black/50 backdrop-blur-sm">
-      <div className="w-full max-w-xs rounded-xl bg-bg-surface p-5 shadow-2xl ring-1 ring-border-default">
-        <h3 className="mb-2 text-[14px] font-bold text-text-primary">Delete Gateway</h3>
-        <p className="mb-4 text-[12px] text-text-secondary">
-          Are you sure you want to delete <span className="font-semibold text-text-primary">{name}</span>?
-        </p>
-
-        {hasFiles && (
-          <label className="mb-4 flex cursor-pointer items-center gap-2.5 rounded-lg bg-bg-elevated px-3 py-2.5 ring-1 ring-border-default transition-colors hover:bg-bg-hover">
-            <input
-              type="checkbox"
-              checked={deleteFiles}
-              onChange={(e) => setDeleteFiles(e.target.checked)}
-              className="h-3.5 w-3.5 rounded accent-accent-red"
-            />
-            <div>
-              <div className="text-[12px] font-medium text-accent-red">Also delete all config files</div>
-              <div className="text-[10px] text-text-ghost">.env, docker-compose.yml, config/, workspace/</div>
-            </div>
-          </label>
-        )}
-
-        <div className="mt-4 flex items-center justify-end gap-2">
-          <button
-            onClick={onCancel}
-            disabled={deleting}
-            className="rounded-lg px-4 py-2 text-[12px] font-medium text-text-tertiary transition-colors hover:text-text-secondary disabled:opacity-40"
-          >
-            Cancel
-          </button>
-          <button
-            onClick={handleConfirm}
-            disabled={deleting}
-            className="inline-flex items-center gap-1.5 rounded-lg bg-accent-red/15 px-4 py-2 text-[12px] font-semibold text-accent-red ring-1 ring-accent-red/25 transition-all hover:bg-accent-red/25 disabled:opacity-40"
-          >
-            {deleting ? (
-              <>
-                <IconSpinner size={13} className="animate-spin" />
-                Deleting...
-              </>
-            ) : (
-              <>
-                <IconXCircle size={13} />
-                Delete
-              </>
-            )}
-          </button>
-        </div>
-      </div>
-    </div>
   );
 }

@@ -4,8 +4,8 @@ import { useState, useRef, useEffect, useCallback } from "react";
 import ReactMarkdown from "react-markdown";
 import type { Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { openUrlInWindow } from "../lib/open-url";
-import type { ComposeStartProgress } from "../app/page";
+import { openUrlInWindow } from "../../lib/open-url";
+import type { ComposeStartProgress } from "../../lib/stores/gateway-store";
 import {
   IconChat,
   IconCode,
@@ -22,21 +22,21 @@ import {
   IconImage,
   IconMic,
   IconFile,
-} from "./icons";
+} from "../icons";
 import { MentionPopup } from "./mention-popup";
-import { UsageHeatmap } from "./usage-heatmap";
-import { ConfigWizard } from "./config-wizard";
-import { OpenClawRpc } from "../lib/openclaw-rpc";
-import type { RpcEvent } from "../lib/openclaw-rpc";
-import { useRpcPool } from "../lib/rpc-pool-context";
-import { parseMentions, extractMentionContent, segmentMentions } from "../lib/mention-utils";
+import { UsageHeatmap } from "../usage-heatmap";
+import { ConfigWizard } from "../config/config-wizard";
+import { OpenClawRpc } from "../../lib/rpc/openclaw-rpc";
+import type { RpcEvent } from "../../lib/rpc/openclaw-rpc";
+import { useRpcPool } from "../../lib/rpc/rpc-pool-context";
+import { parseMentions, extractMentionContent, segmentMentions } from "../../lib/mention-utils";
 import {
   loadMessages,
   saveAllMessages,
   type StoredMessage,
-} from "../lib/chat-store";
-import { recordUsage, estimateTokens } from "../lib/usage-store";
-import { EMOJI_OPTIONS, FEATURED_COUNT } from "../lib/emoji-data";
+} from "../../lib/stores/chat-store";
+import { recordUsage, estimateTokens } from "../../lib/stores/usage-store";
+import { EMOJI_OPTIONS, FEATURED_COUNT } from "../../lib/emoji-data";
 
 type Message = {
   id: string;
@@ -697,18 +697,30 @@ function ChatView({ rootDir, serviceState, lastError, startProgress, hidden, gat
     needsInitialScroll.current = true;
   }, [rootDir]);
 
-  // Scroll to bottom after messages are rendered on initial load
+  // Scroll to bottom after messages are rendered on initial load.
+  // Markdown rendering and image loading can delay layout, so retry until
+  // scrollHeight actually exceeds clientHeight (i.e. content is painted).
   useEffect(() => {
     if (!needsInitialScroll.current || messages.length === 0) return;
     // If hidden, don't consume the flag — wait until we become visible
     if (hidden) return;
     needsInitialScroll.current = false;
-    // Use double rAF to ensure React has committed the DOM updates
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-        scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "instant" });
-      });
-    });
+
+    let attempts = 0;
+    const maxAttempts = 10;
+
+    function tryScroll() {
+      const el = scrollRef.current;
+      if (!el) return;
+      el.scrollTo({ top: el.scrollHeight, behavior: "instant" });
+      // If content hasn't been laid out yet, retry
+      if (el.scrollHeight <= el.clientHeight && attempts < maxAttempts) {
+        attempts++;
+        requestAnimationFrame(tryScroll);
+      }
+    }
+
+    requestAnimationFrame(tryScroll);
   }, [messages, hidden]);
 
   // Persist messages on change (debounced)
@@ -804,14 +816,23 @@ function ChatView({ rootDir, serviceState, lastError, startProgress, hidden, gat
   }, [messages, approvalQueue]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Scroll to bottom when becoming visible (e.g. switching gateways)
+  // Elements with display:none have scrollHeight=0, so retry after layout
   const prevHiddenRef = useRef(hidden);
   useEffect(() => {
     const wasHidden = prevHiddenRef.current;
     prevHiddenRef.current = hidden;
     if (wasHidden && !hidden) {
-      requestAnimationFrame(() => {
-        scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "instant" });
-      });
+      let attempts = 0;
+      function tryScroll() {
+        const el = scrollRef.current;
+        if (!el) return;
+        el.scrollTo({ top: el.scrollHeight, behavior: "instant" });
+        if (el.scrollHeight <= el.clientHeight && attempts < 10) {
+          attempts++;
+          requestAnimationFrame(tryScroll);
+        }
+      }
+      requestAnimationFrame(tryScroll);
     }
   }, [hidden]);
 

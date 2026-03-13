@@ -26,7 +26,7 @@ import {
   IconCpu,
   IconSearch,
   IconChevronDown,
-} from "./icons";
+} from "../icons";
 
 const STEPS = [
   { id: "docker", icon: IconDownload, title: "Docker Environment", desc: "Check Docker and pull the OpenClaw image" },
@@ -39,7 +39,7 @@ const STEPS = [
   { id: "onboard", icon: IconSettings, title: "Finish", desc: "Review and start services" },
 ] as const;
 
-const PLAYWRIGHT_IMAGE = "mcr.microsoft.com/playwright:v1.52.0-noble";
+import { PLAYWRIGHT_IMAGE_FALLBACK } from "../../lib/stores/settings-store";
 
 export type Provider = {
   id: string;
@@ -137,6 +137,14 @@ export const PROVIDERS: Provider[] = [
   { id: "custom", label: "Custom", envKey: "", defaultModel: "" },
 ];
 
+function formatBytes(bytes: number): string {
+  if (bytes === 0) return "0 B";
+  if (bytes < 1000) return `${bytes} B`;
+  if (bytes < 1_000_000) return `${(bytes / 1000).toFixed(1)} kB`;
+  if (bytes < 1_000_000_000) return `${(bytes / 1_000_000).toFixed(1)} MB`;
+  return `${(bytes / 1_000_000_000).toFixed(2)} GB`;
+}
+
 export function ConfigWizard({ onComplete, onClose, skipDocker, fixedRootDir, sharedDir }: { onComplete: (rootDir: string) => void; onClose?: () => void; skipDocker?: boolean; fixedRootDir?: string; sharedDir?: string }) {
   const activeSteps = STEPS.filter((s) => {
     if (skipDocker && s.id === "docker") return false;
@@ -146,11 +154,10 @@ export function ConfigWizard({ onComplete, onClose, skipDocker, fixedRootDir, sh
   const [currentStep, setCurrentStep] = useState(0);
   const [completed, setCompleted] = useState<Set<number>>(new Set());
 
-  // For pond gateways (fixedRootDir set), auto-assign unique ports to avoid conflicts with ClawKing (18789/18790)
+  // For pond gateways (fixedRootDir set), auto-assign unique ports to avoid conflicts with ClawKing (18789)
   const isPond = !!fixedRootDir && fixedRootDir !== "~/clawpond/clawking";
   const [config, setConfig] = useState(() => {
     let gatewayPort = "18789";
-    let bridgePort = "18790";
     if (isPond) {
       // Derive a deterministic port offset from the directory name to reduce collisions
       const dirName = fixedRootDir!.split("/").pop() || "";
@@ -160,7 +167,6 @@ export function ConfigWizard({ onComplete, onClose, skipDocker, fixedRootDir, sh
       }
       const offset = (Math.abs(hash) % 900) + 1; // 1-900 range
       gatewayPort = String(18789 + offset * 2);
-      bridgePort = String(18790 + offset * 2);
     }
     return {
       // Docker
@@ -169,7 +175,6 @@ export function ConfigWizard({ onComplete, onClose, skipDocker, fixedRootDir, sh
       rootDir: fixedRootDir || "~/clawpond/clawking",
       // Gateway
       gatewayPort,
-      bridgePort,
       gatewayBind: "lan",
       gatewayToken: "",
       // Chat Model
@@ -193,6 +198,7 @@ export function ConfigWizard({ onComplete, onClose, skipDocker, fixedRootDir, sh
   const workspaceDir = `${config.rootDir}/workspace`;
   const [imageExists, setImageExists] = useState<boolean | null>(null);
   const [playwrightImageExists, setPlaywrightImageExists] = useState<boolean | null>(null);
+  const [playwrightImage, setPlaywrightImage] = useState(PLAYWRIGHT_IMAGE_FALLBACK);
   const [loading, setLoading] = useState(false);
   const [pullError, setPullError] = useState<string | null>(null);
   const [pullProgress, setPullProgress] = useState<{
@@ -200,6 +206,8 @@ export function ConfigWizard({ onComplete, onClose, skipDocker, fixedRootDir, sh
     status: string;
     layers_done: number;
     layers_total: number;
+    bytes_downloaded: number;
+    bytes_total: number;
     currentImage: string;
   } | null>(null);
   const [dockerStatus, setDockerStatus] = useState<{
@@ -221,21 +229,13 @@ export function ConfigWizard({ onComplete, onClose, skipDocker, fixedRootDir, sh
   const [imageModelError, setImageModelError] = useState<string | null>(null);
   const [imageModelTesting, setImageModelTesting] = useState(false);
   const [imageModelTestResult, setImageModelTestResult] = useState<{ success: boolean; message?: string; error?: string } | null>(null);
-  const [portErrors, setPortErrors] = useState<{ gateway: string | null; bridge: string | null }>({ gateway: null, bridge: null });
+  const [portErrors, setPortErrors] = useState<{ gateway: string | null }>({ gateway: null });
 
   // Debounced port conflict checking
   useEffect(() => {
     const timer = setTimeout(async () => {
       const gp = parseInt(config.gatewayPort, 10);
-      const bp = parseInt(config.bridgePort, 10);
-      const errors: { gateway: string | null; bridge: string | null } = { gateway: null, bridge: null };
-
-      if (config.gatewayPort && config.bridgePort && gp === bp) {
-        errors.gateway = "Same as bridge port";
-        errors.bridge = "Same as gateway port";
-        setPortErrors(errors);
-        return;
-      }
+      const errors: { gateway: string | null } = { gateway: null };
 
       try {
         const { invoke } = await import("@tauri-apps/api/core");
@@ -243,17 +243,13 @@ export function ConfigWizard({ onComplete, onClose, skipDocker, fixedRootDir, sh
           const available = await invoke<boolean>("check_port_available", { port: gp });
           if (!available) errors.gateway = `Port ${gp} is already in use`;
         }
-        if (config.bridgePort && !isNaN(bp) && bp > 0 && bp <= 65535) {
-          const available = await invoke<boolean>("check_port_available", { port: bp });
-          if (!available) errors.bridge = `Port ${bp} is already in use`;
-        }
       } catch {
         // Ignore errors during port check
       }
       setPortErrors(errors);
     }, 500);
     return () => clearTimeout(timer);
-  }, [config.gatewayPort, config.bridgePort]);
+  }, [config.gatewayPort]);
 
   useEffect(() => {
     checkDocker();
@@ -270,7 +266,6 @@ export function ConfigWizard({ onComplete, onClose, skipDocker, fixedRootDir, sh
         const existing = await invoke<{
           image: string | null;
           gateway_port: string | null;
-          bridge_port: string | null;
           gateway_bind: string | null;
           model_name: string | null;
           channels: Record<string, Record<string, unknown>> | null;
@@ -292,7 +287,6 @@ export function ConfigWizard({ onComplete, onClose, skipDocker, fixedRootDir, sh
           const updated = { ...prev, rootDir: detected };
           if (existing.image) updated.image = existing.image;
           if (existing.gateway_port) updated.gatewayPort = existing.gateway_port;
-          if (existing.bridge_port) updated.bridgePort = existing.bridge_port;
           if (existing.gateway_bind) updated.gatewayBind = existing.gateway_bind;
           if (existing.model_name) {
             updated.modelName = existing.model_name;
@@ -340,6 +334,21 @@ export function ConfigWizard({ onComplete, onClose, skipDocker, fixedRootDir, sh
     })();
   }, [fixedRootDir]);
 
+  // Resolve latest Playwright image on mount
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const image = await invoke<string>("resolve_playwright_image");
+        if (!cancelled && image) setPlaywrightImage(image);
+      } catch {
+        // Keep fallback
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
   // Check if Docker images already exist locally
   useEffect(() => {
     if (!config.image) {
@@ -352,7 +361,7 @@ export function ConfigWizard({ onComplete, onClose, skipDocker, fixedRootDir, sh
         const { invoke } = await import("@tauri-apps/api/core");
         const [openclawExists, pwExists] = await Promise.all([
           invoke<boolean>("docker_image_exists", { image: config.image }),
-          invoke<boolean>("docker_image_exists", { image: PLAYWRIGHT_IMAGE }),
+          invoke<boolean>("docker_image_exists", { image: playwrightImage }),
         ]);
         if (!cancelled) {
           setImageExists(openclawExists);
@@ -366,7 +375,7 @@ export function ConfigWizard({ onComplete, onClose, skipDocker, fixedRootDir, sh
       }
     }, 300);
     return () => { cancelled = true; clearTimeout(timer); };
-  }, [config.image]);
+  }, [config.image, playwrightImage]);
 
   async function checkDocker() {
     setDockerStatus({ checking: true, docker: null, dockerVersion: null, compose: null, composeVersion: null });
@@ -402,11 +411,9 @@ export function ConfigWizard({ onComplete, onClose, skipDocker, fixedRootDir, sh
         return config.rootDir.trim().length > 0;
       case "gateway": {
         const gp = parseInt(config.gatewayPort, 10);
-        const bp = parseInt(config.bridgePort, 10);
         return (
           !isNaN(gp) && gp > 0 && gp <= 65535 &&
-          !isNaN(bp) && bp > 0 && bp <= 65535 &&
-          !portErrors.gateway && !portErrors.bridge
+          !portErrors.gateway
         );
       }
       case "model": {
@@ -446,7 +453,6 @@ export function ConfigWizard({ onComplete, onClose, skipDocker, fixedRootDir, sh
           configDir: configDir,
           workspaceDir: workspaceDir,
           gatewayPort: config.gatewayPort,
-          bridgePort: config.bridgePort,
           gatewayBind: config.gatewayBind,
           gatewayToken,
           providerEnvKey: provider?.envKey || "",
@@ -458,6 +464,7 @@ export function ConfigWizard({ onComplete, onClose, skipDocker, fixedRootDir, sh
         const openclawConfig: Record<string, unknown> = {
           browser: {
             enabled: true,
+            relayBindHost: "0.0.0.0",
           },
           agents: {
             defaults: {
@@ -680,7 +687,7 @@ export function ConfigWizard({ onComplete, onClose, skipDocker, fixedRootDir, sh
   async function handlePullImage() {
     setLoading(true);
     setPullError(null);
-    setPullProgress({ percent: 0, status: "Starting...", layers_done: 0, layers_total: 0, currentImage: config.image });
+    setPullProgress({ percent: 0, status: "Starting...", layers_done: 0, layers_total: 0, bytes_downloaded: 0, bytes_total: 0, currentImage: config.image });
 
     let unlisten: (() => void) | undefined;
     try {
@@ -699,6 +706,8 @@ export function ConfigWizard({ onComplete, onClose, skipDocker, fixedRootDir, sh
         layers_done: number;
         layers_total: number;
         current_layer: string | null;
+        bytes_downloaded: number;
+        bytes_total: number;
       }>("docker-pull-progress", (event) => {
         // Scale progress: each image gets an equal share of 0-100
         const imagePercent = event.payload.percent;
@@ -710,6 +719,8 @@ export function ConfigWizard({ onComplete, onClose, skipDocker, fixedRootDir, sh
           status: event.payload.status,
           layers_done: event.payload.layers_done,
           layers_total: event.payload.layers_total,
+          bytes_downloaded: event.payload.bytes_downloaded,
+          bytes_total: event.payload.bytes_total,
           currentImage: prev?.currentImage || config.image,
         }));
       });
@@ -724,13 +735,13 @@ export function ConfigWizard({ onComplete, onClose, skipDocker, fixedRootDir, sh
 
       // Pull Playwright image
       if (needPlaywright) {
-        setPullProgress({ percent: totalImages > 1 ? 50 : 0, status: "Starting Playwright pull...", layers_done: 0, layers_total: 0, currentImage: PLAYWRIGHT_IMAGE });
-        await invoke("docker_pull_image", { image: PLAYWRIGHT_IMAGE });
+        setPullProgress({ percent: totalImages > 1 ? 50 : 0, status: "Starting Playwright pull...", layers_done: 0, layers_total: 0, bytes_downloaded: 0, bytes_total: 0, currentImage: playwrightImage });
+        await invoke("docker_pull_image", { image: playwrightImage });
         pulledCount++;
         setPlaywrightImageExists(true);
       }
 
-      setPullProgress({ percent: 100, status: "All images pulled successfully", layers_done: 0, layers_total: 0, currentImage: "" });
+      setPullProgress({ percent: 100, status: "All images pulled successfully", layers_done: 0, layers_total: 0, bytes_downloaded: 0, bytes_total: 0, currentImage: "" });
     } catch (e) {
       setPullError(typeof e === "string" ? e : "Failed to pull image.");
       setPullProgress(null);
@@ -978,7 +989,7 @@ export function ConfigWizard({ onComplete, onClose, skipDocker, fixedRootDir, sh
                       )}
                     </div>
                     <div className="flex items-center justify-between">
-                      <span className="truncate text-[11px] text-text-tertiary">{PLAYWRIGHT_IMAGE}</span>
+                      <span className="truncate text-[11px] text-text-tertiary">{playwrightImage}</span>
                       {playwrightImageExists ? (
                         <span className="flex items-center gap-1 text-[11px] font-medium text-accent-emerald">
                           <IconCheck size={11} />
@@ -998,6 +1009,11 @@ export function ConfigWizard({ onComplete, onClose, skipDocker, fixedRootDir, sh
                         {pullProgress.layers_total > 0
                           ? `Pulling layers (${pullProgress.layers_done}/${pullProgress.layers_total})`
                           : "Pulling..."}
+                        {pullProgress.bytes_total > 0 && (
+                          <span className="ml-1.5 font-mono text-[10px] text-text-ghost">
+                            {formatBytes(pullProgress.bytes_downloaded)}/{formatBytes(pullProgress.bytes_total)}
+                          </span>
+                        )}
                       </span>
                       <span className="text-[11px] font-medium text-accent-emerald">{pullProgress.percent}%</span>
                     </div>
@@ -1074,24 +1090,14 @@ export function ConfigWizard({ onComplete, onClose, skipDocker, fixedRootDir, sh
             {/* ── Step 3: Gateway ── */}
             {step.id === "gateway" && (
               <>
-                <div className="grid grid-cols-2 gap-3">
-                  <Field
-                    label="Gateway Port"
-                    value={config.gatewayPort}
-                    onChange={(v) => setConfig((c) => ({ ...c, gatewayPort: v }))}
-                    placeholder="18789"
-                    hint="Control UI & API"
-                    error={portErrors.gateway ?? undefined}
-                  />
-                  <Field
-                    label="Bridge Port"
-                    value={config.bridgePort}
-                    onChange={(v) => setConfig((c) => ({ ...c, bridgePort: v }))}
-                    placeholder="18790"
-                    hint="Agent bridge"
-                    error={portErrors.bridge ?? undefined}
-                  />
-                </div>
+                <Field
+                  label="Gateway Port"
+                  value={config.gatewayPort}
+                  onChange={(v) => setConfig((c) => ({ ...c, gatewayPort: v }))}
+                  placeholder="18789"
+                  hint="Control UI & API"
+                  error={portErrors.gateway ?? undefined}
+                />
                 <Field
                   label="Bind Mode"
                   value={config.gatewayBind}

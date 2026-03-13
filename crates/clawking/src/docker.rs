@@ -1,4 +1,4 @@
-use log::info;
+use log::{info, warn};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
@@ -47,6 +47,10 @@ pub struct PullProgress {
     pub layers_total: usize,
     /// Current layer being processed (if any)
     pub current_layer: Option<String>,
+    /// Total bytes downloaded across all layers (if available)
+    pub bytes_downloaded: u64,
+    /// Total bytes to download across all layers (if available)
+    pub bytes_total: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -108,6 +112,8 @@ where
 
     // Track layer states: layer_id -> latest status keyword
     let mut layers: HashMap<String, String> = HashMap::new();
+    // Track per-layer byte progress: layer_id -> (current_bytes, total_bytes)
+    let mut layer_bytes: HashMap<String, (u64, u64)> = HashMap::new();
     let mut last_status: String;
 
     for line in reader.lines() {
@@ -130,6 +136,18 @@ where
             // Skip meta lines like "Digest:", "Status:", "latest:"
             if !layer_id.contains(' ') && layer_id.len() <= 20 {
                 let status_keyword = extract_status_keyword(status_text);
+
+                // Parse byte progress from status text (e.g., "Downloading [==>  ] 1.2MB/50MB")
+                if let Some((current, total)) = parse_byte_progress(status_text) {
+                    layer_bytes.insert(layer_id.to_string(), (current, total));
+                } else if status_keyword == "Download complete" || status_keyword == "Pull complete" || status_keyword == "Already exists" {
+                    // Mark layer as fully downloaded
+                    if let Some((_, total)) = layer_bytes.get(layer_id) {
+                        let total = *total;
+                        layer_bytes.insert(layer_id.to_string(), (total, total));
+                    }
+                }
+
                 layers.insert(layer_id.to_string(), status_keyword);
                 last_status = status_text.to_string();
             }
@@ -141,7 +159,13 @@ where
             .filter(|s| *s == "Pull complete" || *s == "Already exists")
             .count();
 
-        let percent = if layers_total > 0 {
+        // Calculate byte totals across all layers
+        let (bytes_downloaded, bytes_total) = layer_bytes.values().fold((0u64, 0u64), |(dl, tot), (c, t)| (dl + c, tot + t));
+
+        // Calculate percent: prefer byte-based progress when available, fall back to layer count
+        let percent = if bytes_total > 0 {
+            ((bytes_downloaded as f64 / bytes_total as f64) * 100.0) as u8
+        } else if layers_total > 0 {
             ((layers_done as f64 / layers_total as f64) * 100.0) as u8
         } else {
             0
@@ -158,6 +182,8 @@ where
             layers_done,
             layers_total,
             current_layer,
+            bytes_downloaded,
+            bytes_total,
         });
     }
 
@@ -165,12 +191,15 @@ where
     match exit {
         Ok(status) if status.success() => {
             let image_id = inspect_image(image);
+            let (bytes_downloaded, bytes_total) = layer_bytes.values().fold((0u64, 0u64), |(dl, tot), (c, t)| (dl + c, tot + t));
             on_progress(PullProgress {
                 percent: 100,
                 status: "Pull complete".to_string(),
                 layers_done: layers.len(),
                 layers_total: layers.len(),
                 current_layer: None,
+                bytes_downloaded: bytes_total.max(bytes_downloaded),
+                bytes_total,
             });
             PullResult {
                 success: true,
@@ -235,6 +264,54 @@ fn extract_status_keyword(status_text: &str) -> String {
     }
 }
 
+/// Parse byte progress from docker pull status text.
+/// Handles formats like "Downloading [==>  ] 1.2MB/50MB" or "Extracting [=>  ] 3.4kB/50MB"
+fn parse_byte_progress(status_text: &str) -> Option<(u64, u64)> {
+    // Look for the pattern after "] " which contains "current/total"
+    let after_bracket = if let Some(idx) = status_text.find("] ") {
+        &status_text[idx + 2..]
+    } else {
+        return None;
+    };
+
+    let parts: Vec<&str> = after_bracket.trim().split('/').collect();
+    if parts.len() != 2 {
+        return None;
+    }
+
+    let current = parse_size(parts[0].trim())?;
+    let total = parse_size(parts[1].trim())?;
+    Some((current, total))
+}
+
+/// Parse a size string like "1.2MB", "50kB", "3.4GB" into bytes.
+fn parse_size(s: &str) -> Option<u64> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+
+    // Find where the numeric part ends and the unit begins
+    let num_end = s
+        .find(|c: char| c.is_alphabetic())
+        .unwrap_or(s.len());
+
+    let num_str = &s[..num_end];
+    let unit = s[num_end..].trim().to_lowercase();
+
+    let value: f64 = num_str.parse().ok()?;
+    let multiplier: f64 = match unit.as_str() {
+        "b" => 1.0,
+        "kb" => 1_000.0,
+        "mb" => 1_000_000.0,
+        "gb" => 1_000_000_000.0,
+        "tb" => 1_000_000_000_000.0,
+        _ => return None,
+    };
+
+    Some((value * multiplier) as u64)
+}
+
 fn detect_cmd(cmd: &str, args: &[&str]) -> (bool, Option<String>) {
     match Command::new(cmd).args(args).hide_console().output() {
         Ok(out) if out.status.success() => {
@@ -282,7 +359,6 @@ pub struct ComposeConfig {
     pub config_dir: String,
     pub workspace_dir: String,
     pub gateway_port: String,
-    pub bridge_port: String,
     pub gateway_bind: String,
     pub gateway_token: String,
     /// Provider API key env var name, e.g. "ANTHROPIC_API_KEY"
@@ -293,9 +369,20 @@ pub struct ComposeConfig {
     pub shared_dir: String,
 }
 
+/// Detect whether we're running on Linux (where `network_mode: host` actually works).
+/// On macOS and Windows, Docker Desktop runs containers in a Linux VM,
+/// so `network_mode: host` maps to the VM's network, not the macOS/Windows host.
+fn supports_host_network() -> bool {
+    cfg!(target_os = "linux")
+}
+
 /// Write `.env` and `docker-compose.yml` to the given root directory.
 pub fn write_compose_files(root_dir: &Path, cfg: &ComposeConfig) -> Result<(), String> {
     std::fs::create_dir_all(root_dir).map_err(|e| format!("Failed to create directory: {}", e))?;
+
+    // Compute relay port = gateway_port + 3 (matches the gateway's internal derivation)
+    let gateway_port_num: u16 = cfg.gateway_port.parse().unwrap_or(18789);
+    let relay_port = gateway_port_num + 3;
 
     // Write .env
     let mut env_content = format!(
@@ -303,14 +390,14 @@ pub fn write_compose_files(root_dir: &Path, cfg: &ComposeConfig) -> Result<(), S
          OPENCLAW_CONFIG_DIR={config_dir}\n\
          OPENCLAW_WORKSPACE_DIR={workspace_dir}\n\
          OPENCLAW_GATEWAY_PORT={gateway_port}\n\
-         OPENCLAW_BRIDGE_PORT={bridge_port}\n\
+         OPENCLAW_RELAY_PORT={relay_port}\n\
          OPENCLAW_GATEWAY_BIND={gateway_bind}\n\
          OPENCLAW_GATEWAY_TOKEN={gateway_token}\n",
         image = cfg.image,
         config_dir = cfg.config_dir,
         workspace_dir = cfg.workspace_dir,
         gateway_port = cfg.gateway_port,
-        bridge_port = cfg.bridge_port,
+        relay_port = relay_port,
         gateway_bind = cfg.gateway_bind,
         gateway_token = cfg.gateway_token,
     );
@@ -346,17 +433,46 @@ pub fn write_compose_files(root_dir: &Path, cfg: &ComposeConfig) -> Result<(), S
     };
 
     // Write docker-compose.yml
-    // Uses network_mode: host so relay (gateway_port+3) is directly accessible from host
+    // On Linux: use network_mode: host so relay (gateway_port+3) is directly accessible
+    // On macOS/Windows: use explicit port mappings and host.docker.internal for browser
+    let use_host_network = supports_host_network();
+
+    let network_section = if use_host_network {
+        "    network_mode: host".to_string()
+    } else {
+        format!(
+            "    ports:\n\
+             \x20     - \"127.0.0.1:${{OPENCLAW_GATEWAY_PORT:-{gp}}}:${{OPENCLAW_GATEWAY_PORT:-{gp}}}\"\n\
+             \x20     - \"127.0.0.1:${{OPENCLAW_RELAY_PORT:-{rp}}}:${{OPENCLAW_RELAY_PORT:-{rp}}}\"",
+            gp = cfg.gateway_port,
+            rp = relay_port,
+        )
+    };
+
+    // Browser relay: gateway connects to the shared Playwright browser via relay port
+    let playwright_endpoint = if use_host_network {
+        format!("ws://127.0.0.1:{}", relay_port)
+    } else {
+        format!("ws://host.docker.internal:{}", relay_port)
+    };
+
+    // openclaw-cli network mode: on Linux share the gateway's host network, on others use bridge
+    let cli_network = if use_host_network {
+        "    network_mode: \"service:openclaw-gateway\"".to_string()
+    } else {
+        "    network_mode: \"service:openclaw-gateway\"".to_string()
+    };
+
     let compose_content = format!(
         r#"services:
   openclaw-gateway:
     image: ${{OPENCLAW_IMAGE:-ghcr.io/openclaw/openclaw:latest}}
-    network_mode: host
+{network_section}
     environment:
       HOME: /home/node
       TERM: xterm-256color
       OPENCLAW_GATEWAY_TOKEN: ${{OPENCLAW_GATEWAY_TOKEN}}{provider_env}
-      PLAYWRIGHT_WS_ENDPOINT: ws://127.0.0.1:18790
+      PLAYWRIGHT_WS_ENDPOINT: {playwright_endpoint}
     volumes:
       - ${{OPENCLAW_CONFIG_DIR}}:/home/node/.openclaw
       - ${{OPENCLAW_WORKSPACE_DIR}}:/home/node/.openclaw/workspace{shared_vol}
@@ -383,7 +499,7 @@ pub fn write_compose_files(root_dir: &Path, cfg: &ComposeConfig) -> Result<(), S
 
   openclaw-cli:
     image: ${{OPENCLAW_IMAGE:-ghcr.io/openclaw/openclaw:latest}}
-    network_mode: "service:openclaw-gateway"
+{cli_network}
     cap_drop:
       - NET_RAW
       - NET_ADMIN
@@ -393,7 +509,7 @@ pub fn write_compose_files(root_dir: &Path, cfg: &ComposeConfig) -> Result<(), S
       HOME: /home/node
       TERM: xterm-256color
       OPENCLAW_GATEWAY_TOKEN: ${{OPENCLAW_GATEWAY_TOKEN}}{provider_env}
-      PLAYWRIGHT_WS_ENDPOINT: ws://127.0.0.1:18790
+      PLAYWRIGHT_WS_ENDPOINT: {playwright_endpoint}
       BROWSER: echo
     volumes:
       - ${{OPENCLAW_CONFIG_DIR}}:/home/node/.openclaw
@@ -405,8 +521,11 @@ pub fn write_compose_files(root_dir: &Path, cfg: &ComposeConfig) -> Result<(), S
     depends_on:
       - openclaw-gateway
 "#,
+        network_section = network_section,
+        cli_network = cli_network,
         provider_env = provider_env_line,
         shared_vol = shared_volume_line,
+        playwright_endpoint = playwright_endpoint,
     );
 
     let compose_path = root_dir.join("docker-compose.yml");
@@ -878,11 +997,17 @@ pub fn compose_status(root_dir: &Path) -> ServiceStatus {
 
 // ── Browser sidecar incremental update ──
 
-const BROWSER_ENV_LINE: &str = "      PLAYWRIGHT_WS_ENDPOINT: ws://127.0.0.1:18790";
+fn browser_env_line(relay_port: u16) -> String {
+    let host = if supports_host_network() {
+        "127.0.0.1"
+    } else {
+        "host.docker.internal"
+    };
+    format!("      PLAYWRIGHT_WS_ENDPOINT: ws://{}:{}", host, relay_port)
+}
 
 /// Ensure an existing gateway docker-compose.yml has the correct shared browser config.
 /// Idempotent: strips all browser-related content, then re-adds the PLAYWRIGHT_WS_ENDPOINT env.
-/// With `network_mode: host`, gateways connect to the shared browser via `127.0.0.1:18790`.
 /// Also handles migration from legacy per-gateway `openclaw-browser` format.
 pub fn update_browser_sidecar(root_dir: &Path, enabled: bool) -> Result<(), String> {
     let compose_path = root_dir.join("docker-compose.yml");
@@ -893,9 +1018,24 @@ pub fn update_browser_sidecar(root_dir: &Path, enabled: bool) -> Result<(), Stri
     let clean_content = strip_all_browser_content(&content);
 
     // Step 2: If enabling, add PLAYWRIGHT_WS_ENDPOINT env line
-    // No network config needed — gateway uses network_mode: host
+    // Read relay port from .env (gateway_port + 3)
     let new_content = if enabled {
-        add_env_after_token(&clean_content, BROWSER_ENV_LINE)
+        let env_path = root_dir.join(".env");
+        let env_content = std::fs::read_to_string(&env_path).unwrap_or_default();
+        let relay_port: u16 = env_content.lines()
+            .find(|l| l.starts_with("OPENCLAW_RELAY_PORT="))
+            .and_then(|l| l.strip_prefix("OPENCLAW_RELAY_PORT="))
+            .and_then(|v| v.parse().ok())
+            .unwrap_or_else(|| {
+                // Fallback: derive from gateway port
+                let gp: u16 = env_content.lines()
+                    .find(|l| l.starts_with("OPENCLAW_GATEWAY_PORT="))
+                    .and_then(|l| l.strip_prefix("OPENCLAW_GATEWAY_PORT="))
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(18789);
+                gp + 3
+            });
+        add_env_after_token(&clean_content, &browser_env_line(relay_port))
     } else {
         clean_content
     };
@@ -1001,6 +1141,7 @@ fn strip_all_browser_content(content: &str) -> String {
 /// Migrate an existing gateway compose to the shared-browser format. Steps:
 ///   1. If legacy `openclaw-browser` service exists, `compose down` to stop old containers
 ///   2. Rewrite compose file idempotently: strip old content, add shared network + env
+///   3. On non-Linux: fix `network_mode: host` by replacing with explicit port mappings
 ///
 /// Returns `true` if any changes were made.
 pub fn migrate_compose_to_shared_browser(root_dir: &Path) -> Result<bool, String> {
@@ -1014,10 +1155,152 @@ pub fn migrate_compose_to_shared_browser(root_dir: &Path) -> Result<bool, String
 
     let has_legacy = content.contains("openclaw-browser");
 
-    // If legacy format, stop old containers first (including old openclaw-browser)
-    if has_legacy {
-        info!("Legacy openclaw-browser detected in {}, stopping old containers", root_dir.display());
+    // Fix double-brace bug: previous code generated `${{VAR}}` instead of `${VAR}`
+    let has_double_braces = content.contains("${{");
+
+    // On non-Linux, fix `network_mode: host` by replacing with port mappings
+    let needs_network_fix = !supports_host_network() && content.contains("network_mode: host");
+
+    // If legacy format or needs network fix, stop old containers first
+    if has_legacy || needs_network_fix {
+        if has_legacy {
+            info!("Legacy openclaw-browser detected in {}, stopping old containers", root_dir.display());
+        }
+        if needs_network_fix {
+            info!("Fixing network_mode: host on non-Linux platform in {}", root_dir.display());
+        }
         let _ = compose_down(root_dir);
+    }
+
+    // Fix double-brace `${{VAR}}` → `${VAR}` in compose and .env files
+    if has_double_braces {
+        info!("Fixing double-brace variables in {}", root_dir.display());
+        let fixed = fix_double_braces(&content);
+        std::fs::write(&compose_path, fixed.as_bytes())
+            .map_err(|e| format!("Failed to write docker-compose.yml: {}", e))?;
+    }
+
+    // Also fix .env if it has double braces
+    let env_path = root_dir.join(".env");
+    if env_path.exists() {
+        let env_content = std::fs::read_to_string(&env_path).unwrap_or_default();
+        if env_content.contains("${{") {
+            let fixed = fix_double_braces(&env_content);
+            std::fs::write(&env_path, fixed.as_bytes())
+                .map_err(|e| format!("Failed to write .env: {}", e))?;
+        }
+    }
+
+    // Re-read content after potential double-brace fix
+    let content = std::fs::read_to_string(&compose_path)
+        .map_err(|e| format!("Failed to read docker-compose.yml: {}", e))?;
+
+    // Read .env for port values (used by network fix and relay port migration)
+    let env_path = root_dir.join(".env");
+    let env_content = std::fs::read_to_string(&env_path).unwrap_or_default();
+    let gateway_port = env_content.lines()
+        .find(|l| l.starts_with("OPENCLAW_GATEWAY_PORT="))
+        .and_then(|l| l.strip_prefix("OPENCLAW_GATEWAY_PORT="))
+        .unwrap_or("18789")
+        .to_string();
+
+    // Compute relay port = gateway_port + 3 (matches gateway's internal derivation)
+    let gateway_port_num: u16 = gateway_port.parse().unwrap_or(18789);
+    let relay_port = gateway_port_num + 3;
+
+    // Ensure OPENCLAW_RELAY_PORT is in .env; remove legacy OPENCLAW_BRIDGE_PORT
+    {
+        let mut new_env: Vec<String> = env_content.lines()
+            .filter(|l| !l.starts_with("OPENCLAW_BRIDGE_PORT="))
+            .map(|l| l.to_string())
+            .collect();
+        if !new_env.iter().any(|l| l.starts_with("OPENCLAW_RELAY_PORT=")) {
+            new_env.push(format!("OPENCLAW_RELAY_PORT={}", relay_port));
+        }
+        let mut joined = new_env.join("\n");
+        if !joined.ends_with('\n') {
+            joined.push('\n');
+        }
+        std::fs::write(&env_path, joined.as_bytes())
+            .map_err(|e| format!("Failed to write .env: {}", e))?;
+    }
+
+    // Fix network_mode: host on non-Linux platforms
+    if needs_network_fix {
+        let port_mapping = format!(
+            "    ports:\n\
+             \x20     - \"127.0.0.1:${{OPENCLAW_GATEWAY_PORT:-{gp}}}:${{OPENCLAW_GATEWAY_PORT:-{gp}}}\"\n\
+             \x20     - \"127.0.0.1:${{OPENCLAW_RELAY_PORT:-{rp}}}:${{OPENCLAW_RELAY_PORT:-{rp}}}\"",
+            gp = gateway_port,
+            rp = relay_port,
+        );
+
+        let fixed = content.replace("    network_mode: host", &port_mapping);
+        std::fs::write(&compose_path, fixed.as_bytes())
+            .map_err(|e| format!("Failed to write docker-compose.yml: {}", e))?;
+    }
+
+    // Remove legacy OPENCLAW_BRIDGE_PORT from compose port mappings and ensure relay port exists
+    if !supports_host_network() {
+        let current = std::fs::read_to_string(&compose_path).unwrap_or_default();
+        let mut fixed = current.clone();
+
+        // Remove any OPENCLAW_BRIDGE_PORT port mapping lines
+        let bridge_port_lines: Vec<String> = fixed.lines()
+            .filter(|l| l.contains("OPENCLAW_BRIDGE_PORT"))
+            .map(|l| l.to_string())
+            .collect();
+        for line in &bridge_port_lines {
+            fixed = fixed.replace(&format!("{}\n", line), "");
+        }
+
+        // Add relay port if missing
+        if !fixed.contains("OPENCLAW_RELAY_PORT") && fixed.contains("OPENCLAW_GATEWAY_PORT") {
+            let relay_line = format!(
+                "      - \"127.0.0.1:${{OPENCLAW_RELAY_PORT:-{rp}}}:${{OPENCLAW_RELAY_PORT:-{rp}}}\"",
+                rp = relay_port,
+            );
+            // Insert after the gateway port line
+            if let Some(gp_line) = fixed.lines().find(|l| l.contains("OPENCLAW_GATEWAY_PORT")) {
+                fixed = fixed.replace(
+                    gp_line,
+                    &format!("{}\n{}", gp_line, relay_line),
+                );
+            }
+        }
+
+        if fixed != current {
+            std::fs::write(&compose_path, fixed.as_bytes())
+                .map_err(|e| format!("Failed to write docker-compose.yml: {}", e))?;
+        }
+    }
+
+    // Fix Playwright WS endpoint: use correct host and relay port
+    {
+        let current = std::fs::read_to_string(&compose_path).unwrap_or_default();
+        let correct_host = if supports_host_network() { "127.0.0.1" } else { "host.docker.internal" };
+        let correct_endpoint = format!("ws://{}:{}", correct_host, relay_port);
+
+        let mut fixed = current.clone();
+        // Fix old hardcoded 18790 endpoints
+        fixed = fixed.replace("ws://127.0.0.1:18790", &correct_endpoint);
+        fixed = fixed.replace("ws://host.docker.internal:18790", &correct_endpoint);
+        // Fix wrong host for current platform
+        if !supports_host_network() {
+            fixed = fixed.replace(
+                &format!("ws://127.0.0.1:{}", relay_port),
+                &correct_endpoint,
+            );
+        } else {
+            fixed = fixed.replace(
+                &format!("ws://host.docker.internal:{}", relay_port),
+                &correct_endpoint,
+            );
+        }
+        if fixed != current {
+            std::fs::write(&compose_path, fixed.as_bytes())
+                .map_err(|e| format!("Failed to write docker-compose.yml: {}", e))?;
+        }
     }
 
     // Idempotently ensure correct shared-browser format
@@ -1025,7 +1308,56 @@ pub fn migrate_compose_to_shared_browser(root_dir: &Path) -> Result<bool, String
     update_browser_sidecar(root_dir, true)?;
     let after = std::fs::read_to_string(&compose_path).unwrap_or_default();
 
+    // Ensure openclaw.json has browser.relayBindHost = "0.0.0.0" so relay is accessible from host
+    let env_content_final = std::fs::read_to_string(&env_path).unwrap_or_default();
+    if let Some(config_dir) = env_content_final.lines()
+        .find(|l| l.starts_with("OPENCLAW_CONFIG_DIR="))
+        .and_then(|l| l.strip_prefix("OPENCLAW_CONFIG_DIR="))
+    {
+        let config_path = Path::new(config_dir).join("openclaw.json");
+        if config_path.exists() {
+            if let Ok(content) = std::fs::read_to_string(&config_path) {
+                if let Ok(mut json) = serde_json::from_str::<serde_json::Value>(&content) {
+                    let needs_update = json.get("browser")
+                        .and_then(|b| b.get("relayBindHost"))
+                        .and_then(|v| v.as_str())
+                        != Some("0.0.0.0");
+                    if needs_update {
+                        if json.get("browser").is_none() {
+                            json["browser"] = serde_json::json!({});
+                        }
+                        json["browser"]["relayBindHost"] = serde_json::json!("0.0.0.0");
+                        if let Ok(out) = serde_json::to_string_pretty(&json) {
+                            let _ = std::fs::write(&config_path, out.as_bytes());
+                            info!("Added browser.relayBindHost to {}", config_path.display());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     Ok(before != after)
+}
+
+/// Fix double-brace docker-compose variable references: `${{VAR}}` → `${VAR}`.
+/// Caused by a previous bug in Rust `format!()` brace escaping.
+fn fix_double_braces(content: &str) -> String {
+    // The bug produced `${{OPENCLAW_GATEWAY_PORT:-18789}}` instead of `${...}`.
+    // Simply collapse `${{` → `${` and `}}` → `}` for each occurrence.
+    // Process left-to-right: find `${{`, replace with `${`, then find its matching `}}`
+    // and replace with `}`.
+    let mut result = content.to_string();
+    while let Some(start) = result.find("${{") {
+        // Replace `${{` with `${`
+        result.replace_range(start..start + 3, "${");
+        // Find the matching `}}` after this point and replace with `}`
+        if let Some(end) = result[start..].find("}}") {
+            let abs = start + end;
+            result.replace_range(abs..abs + 2, "}");
+        }
+    }
+    result
 }
 
 /// Insert an env line after each `OPENCLAW_GATEWAY_TOKEN` line in the compose content.
@@ -1045,20 +1377,21 @@ fn add_env_after_token(content: &str, env_line: &str) -> String {
 // ── Global browser compose management ──
 
 /// Write a standalone docker-compose.yml for the shared Playwright browser container.
-pub fn write_browser_compose(browser_dir: &Path, cdp_port: &str) -> Result<(), String> {
+pub fn write_browser_compose(browser_dir: &Path, relay_port: &str, image: &str) -> Result<(), String> {
     std::fs::create_dir_all(browser_dir)
         .map_err(|e| format!("Failed to create browser directory: {}", e))?;
 
     let compose_content = format!(
         r#"services:
   shared-browser:
-    image: mcr.microsoft.com/playwright:v1.52.0-noble
+    image: {image}
     command: ["npx", "playwright", "run-server", "--port", "3000", "--host", "0.0.0.0"]
     ports:
-      - "127.0.0.1:{cdp_port}:3000"
+      - "127.0.0.1:{relay_port}:3000"
     restart: unless-stopped
 "#,
-        cdp_port = cdp_port,
+        image = image,
+        relay_port = relay_port,
     );
 
     let compose_path = browser_dir.join("docker-compose.yml");
@@ -1130,5 +1463,266 @@ pub fn browser_status(browser_dir: &Path) -> bool {
             stdout.contains("running")
         }
         _ => false,
+    }
+}
+
+// ── Playwright image version resolution ──
+
+const FALLBACK_PLAYWRIGHT_TAG: &str = "v1.52.0-noble";
+const MCR_IMAGE_PREFIX: &str = "mcr.microsoft.com/playwright";
+
+/// Resolve the latest Playwright Docker image tag.
+/// Tries MCR registry tags API first, then npm registry, falls back to a built-in version.
+pub fn resolve_playwright_image() -> String {
+    // Try MCR tags API
+    match resolve_from_mcr() {
+        Ok(tag) => {
+            info!("Resolved Playwright image from MCR: {}", tag);
+            return format!("{}:{}", MCR_IMAGE_PREFIX, tag);
+        }
+        Err(e) => {
+            warn!("MCR tags API failed: {}", e);
+        }
+    }
+
+    // Fallback: npm registry
+    match resolve_from_npm() {
+        Ok(tag) => {
+            info!("Resolved Playwright image from npm: {}", tag);
+            return format!("{}:{}", MCR_IMAGE_PREFIX, tag);
+        }
+        Err(e) => {
+            warn!("npm registry fallback failed: {}", e);
+        }
+    }
+
+    // Final fallback
+    info!("Using built-in fallback Playwright image tag: {}", FALLBACK_PLAYWRIGHT_TAG);
+    format!("{}:{}", MCR_IMAGE_PREFIX, FALLBACK_PLAYWRIGHT_TAG)
+}
+
+fn resolve_from_mcr() -> std::result::Result<String, String> {
+    let body: serde_json::Value = ureq::get("https://mcr.microsoft.com/v2/playwright/tags/list")
+        .call()
+        .map_err(|e| format!("MCR request failed: {}", e))?
+        .body_mut()
+        .read_json()
+        .map_err(|e| format!("MCR JSON parse failed: {}", e))?;
+
+    let tags = body
+        .get("tags")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| "MCR response missing 'tags' array".to_string())?;
+
+    // Filter tags matching v<major>.<minor>.<patch>-noble (exclude -amd64/-arm64 suffixes)
+    let re_pattern = regex::Regex::new(r"^v(\d+)\.(\d+)\.(\d+)-noble$")
+        .map_err(|e| format!("Regex error: {}", e))?;
+
+    let mut versions: Vec<(u64, u64, u64, String)> = Vec::new();
+    for tag in tags {
+        if let Some(s) = tag.as_str() {
+            if let Some(caps) = re_pattern.captures(s) {
+                let major: u64 = caps[1].parse().unwrap_or(0);
+                let minor: u64 = caps[2].parse().unwrap_or(0);
+                let patch: u64 = caps[3].parse().unwrap_or(0);
+                versions.push((major, minor, patch, s.to_string()));
+            }
+        }
+    }
+
+    versions.sort_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then(a.1.cmp(&b.1))
+            .then(a.2.cmp(&b.2))
+    });
+
+    versions
+        .last()
+        .map(|(_, _, _, tag)| tag.clone())
+        .ok_or_else(|| "No matching v*-noble tags found".to_string())
+}
+
+fn resolve_from_npm() -> std::result::Result<String, String> {
+    let body: serde_json::Value = ureq::get("https://registry.npmjs.org/playwright/latest")
+        .call()
+        .map_err(|e| format!("npm request failed: {}", e))?
+        .body_mut()
+        .read_json()
+        .map_err(|e| format!("npm JSON parse failed: {}", e))?;
+
+    let version = body
+        .get("version")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "npm response missing 'version'".to_string())?;
+
+    Ok(format!("v{}-noble", version))
+}
+
+// ── Image update detection ──
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImageUpdateInfo {
+    pub installed: bool,
+    pub local_digest: Option<String>,
+    pub remote_digest: Option<String>,
+    pub needs_update: bool,
+}
+
+/// Check if a Docker image needs updating by comparing local and remote digests.
+pub fn check_image_update(image: &str) -> ImageUpdateInfo {
+    let local_digest = get_local_digest(image);
+    let installed = local_digest.is_some();
+
+    if !installed {
+        return ImageUpdateInfo {
+            installed: false,
+            local_digest: None,
+            remote_digest: None,
+            needs_update: false,
+        };
+    }
+
+    let remote_digest = get_remote_digest(image);
+
+    let needs_update = match (&local_digest, &remote_digest) {
+        (Some(local), Some(remote)) => local != remote,
+        _ => false, // Can't determine, assume no update needed
+    };
+
+    ImageUpdateInfo {
+        installed,
+        local_digest,
+        remote_digest,
+        needs_update,
+    }
+}
+
+/// Get the digest of a locally installed image from RepoDigests.
+fn get_local_digest(image: &str) -> Option<String> {
+    let output = Command::new("docker")
+        .args(["image", "inspect", image, "--format", "{{.RepoDigests}}"])
+        .hide_console()
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    // Output looks like: [registry/image@sha256:abc123...]
+    // Extract the sha256:... part
+    if let Some(pos) = stdout.find("sha256:") {
+        let rest = &stdout[pos..];
+        let end = rest.find(']').or_else(|| rest.find(' ')).unwrap_or(rest.len());
+        Some(rest[..end].to_string())
+    } else {
+        None
+    }
+}
+
+/// Get the remote digest of an image via `docker manifest inspect`.
+fn get_remote_digest(image: &str) -> Option<String> {
+    let output = Command::new("docker")
+        .args(["manifest", "inspect", image])
+        .hide_console()
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).ok()?;
+
+    // For manifest lists, look at the digest field
+    if let Some(digest) = json.get("digest").and_then(|v| v.as_str()) {
+        return Some(digest.to_string());
+    }
+
+    // For single manifests, check config.digest
+    if let Some(digest) = json
+        .get("config")
+        .and_then(|c| c.get("digest"))
+        .and_then(|v| v.as_str())
+    {
+        return Some(digest.to_string());
+    }
+
+    // Try to get from manifests array (manifest list)
+    if let Some(manifests) = json.get("manifests").and_then(|v| v.as_array()) {
+        // Find the manifest matching current architecture
+        let arch = std::env::consts::ARCH;
+        let docker_arch = match arch {
+            "x86_64" => "amd64",
+            "aarch64" => "arm64",
+            _ => arch,
+        };
+
+        for m in manifests {
+            let platform_arch = m
+                .get("platform")
+                .and_then(|p| p.get("architecture"))
+                .and_then(|v| v.as_str());
+            if platform_arch == Some(docker_arch) {
+                if let Some(digest) = m.get("digest").and_then(|v| v.as_str()) {
+                    return Some(digest.to_string());
+                }
+            }
+        }
+
+        // If no arch match, just use the first digest
+        if let Some(first) = manifests.first() {
+            if let Some(digest) = first.get("digest").and_then(|v| v.as_str()) {
+                return Some(digest.to_string());
+            }
+        }
+    }
+
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_fix_double_braces() {
+        // Typical broken compose line
+        let input = r#"      - "127.0.0.1:${{OPENCLAW_GATEWAY_PORT:-18789}}:${{OPENCLAW_GATEWAY_PORT:-18789}}""#;
+        let expected = r#"      - "127.0.0.1:${OPENCLAW_GATEWAY_PORT:-18789}:${OPENCLAW_GATEWAY_PORT:-18789}""#;
+        assert_eq!(fix_double_braces(input), expected);
+    }
+
+    #[test]
+    fn test_fix_double_braces_no_change() {
+        // Already correct — should be untouched
+        let input = r#"      - "127.0.0.1:${OPENCLAW_GATEWAY_PORT:-18789}:${OPENCLAW_GATEWAY_PORT:-18789}""#;
+        assert_eq!(fix_double_braces(input), input);
+    }
+
+    #[test]
+    fn test_fix_double_braces_multiline() {
+        let input = "image: ${{OPENCLAW_IMAGE:-ghcr.io/openclaw/openclaw:latest}}\ntoken: ${{OPENCLAW_GATEWAY_TOKEN}}\n";
+        let expected = "image: ${OPENCLAW_IMAGE:-ghcr.io/openclaw/openclaw:latest}\ntoken: ${OPENCLAW_GATEWAY_TOKEN}\n";
+        assert_eq!(fix_double_braces(input), expected);
+    }
+
+    #[test]
+    fn test_parse_byte_progress() {
+        assert_eq!(parse_byte_progress("Downloading [==>  ] 1.2MB/50MB"), Some((1_200_000, 50_000_000)));
+        assert_eq!(parse_byte_progress("Extracting [=>   ] 3.4kB/100kB"), Some((3_400, 100_000)));
+        assert_eq!(parse_byte_progress("Pull complete"), None);
+        assert_eq!(parse_byte_progress("Already exists"), None);
+    }
+
+    #[test]
+    fn test_parse_size() {
+        assert_eq!(parse_size("1.2MB"), Some(1_200_000));
+        assert_eq!(parse_size("50kB"), Some(50_000));
+        assert_eq!(parse_size("2.5GB"), Some(2_500_000_000));
+        assert_eq!(parse_size("100B"), Some(100));
+        assert_eq!(parse_size(""), None);
     }
 }

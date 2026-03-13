@@ -214,6 +214,8 @@ pub fn run() {
             claw_ui_bridge::browser_start,
             claw_ui_bridge::browser_stop,
             claw_ui_bridge::browser_health,
+            claw_ui_bridge::resolve_playwright_image,
+            claw_ui_bridge::check_image_update,
             claw_ui_bridge::compose_start,
             claw_ui_bridge::compose_stop,
             claw_ui_bridge::compose_health,

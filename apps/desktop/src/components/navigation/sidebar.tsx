@@ -4,8 +4,8 @@ import {
   IconPlus,
   IconChevronRight,
   IconShield,
-} from "./icons";
-import type { ServiceState } from "../app/page";
+} from "../icons";
+import type { ServiceState } from "../../lib/stores/gateway-store";
 
 export type GatewayItem = {
   id: string;
