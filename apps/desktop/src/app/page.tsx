@@ -18,27 +18,32 @@ import {
   type Gateway,
   type ServiceState,
   type ComposeStartProgress,
-  loadGateways,
+  loadGatewaysWithMigration,
   saveGateways,
   loadAgentIcons,
   saveAgentIcons,
 } from "../lib/stores/gateway-store";
 import {
-  SHARED_DIR_STORAGE_KEY,
   THEME_STORAGE_KEY,
-  SECURITY_OFFICER_STORAGE_KEY,
   loadSharedDir,
   loadTheme,
   saveTheme,
   loadSecurityOfficer,
   saveSecurityOfficer,
+  saveSharedDir,
 } from "../lib/stores/settings-store";
+import { migrateIfNeeded } from "../lib/stores/migration";
 
 // Re-export types for backwards compatibility with any external references
 export type { ServiceState, ComposeStartProgress } from "../lib/stores/gateway-store";
 
+// SSR-safe defaults (localStorage unavailable during static export pre-render)
+const SSR_DEFAULT_GATEWAYS: Gateway[] = [
+  { id: "default", name: "ClawKing", emoji: "\u{1F99E}", type: "local", rootDir: "~/.openclaw", configured: false, serviceState: "unconfigured" },
+];
+
 export default function Home() {
-  const [gateways, setGateways] = useState<Gateway[]>(loadGateways);
+  const [gateways, setGateways] = useState<Gateway[]>(SSR_DEFAULT_GATEWAYS);
   const [activeGatewayId, setActiveGatewayId] = useState("default");
   const [sidebarExpanded, setSidebarExpanded] = useState(false);
 
@@ -48,14 +53,53 @@ export default function Home() {
   const [deleteConfirm, setDeleteConfirm] = useState<{ gatewayId: string; name: string; rootDir: string | null } | null>(null);
   const [settingsModal, setSettingsModal] = useState(false);
   const [updateModal, setUpdateModal] = useState(false);
-  const [sharedDir, setSharedDir] = useState(loadSharedDir);
+  const [sharedDir, setSharedDir] = useState("");
   const [settingsDraft, setSettingsDraft] = useState("");
-  const [theme, setTheme] = useState<"dark" | "light">(loadTheme);
-  const [securityOfficerId, setSecurityOfficerId] = useState<string | null>(loadSecurityOfficer);
+  const [theme, setTheme] = useState<"dark" | "light">("dark");
+  const [securityOfficerId, setSecurityOfficerId] = useState<string | null>(null);
 
   // Agent state: per-gateway agent lists (agents in list + allowed subagents) and cached emoji icons
   const [gatewayAgents, setGatewayAgents] = useState<Record<string, { agents: string[]; allowed: string[] }>>({});
-  const [agentIcons, setAgentIcons] = useState<Record<string, string>>(loadAgentIcons);
+  const [agentIcons, setAgentIcons] = useState<Record<string, string>>({});
+
+  // Hydrate from SQLite after mount (migration runs first)
+  useEffect(() => {
+    (async () => {
+      // Run one-time migration from localStorage → SQLite
+      await migrateIfNeeded();
+
+      let { gateways: loaded, migrations } = await loadGatewaysWithMigration();
+
+      // Auto-detect default gateway config (must run after load, before setGateways)
+      const { invoke } = await import("@tauri-apps/api/core");
+      try {
+        const detected = await invoke<string | null>("detect_config");
+        if (detected) {
+          const detectedType = detected === "~/.openclaw" ? "local" as const : "docker" as const;
+          loaded = loaded.map((g) =>
+            g.id === "default" && !g.configured
+              ? { ...g, rootDir: detected, type: detectedType, configured: true, serviceState: "loading" as const }
+              : g
+          );
+        }
+      } catch { /* no existing config */ }
+
+      setGateways(loaded);
+      setSharedDir(await loadSharedDir());
+      setTheme(await loadTheme());
+      setSecurityOfficerId(await loadSecurityOfficer());
+      setAgentIcons(await loadAgentIcons());
+
+      // Migrate legacy pond directories on disk (fire-and-forget)
+      if (migrations.length > 0) {
+        for (const { oldDir, newDir } of migrations) {
+          invoke("migrate_pond_dir", { oldRootDir: oldDir, newRootDir: newDir })
+            .then(() => console.log(`[migration] moved ${oldDir} → ${newDir}`))
+            .catch((e: unknown) => console.warn(`[migration] failed ${oldDir} → ${newDir}:`, e));
+        }
+      }
+    })();
+  }, []);
 
   const handleAgentIconChange = useCallback((gatewayId: string, agentName: string, emoji: string) => {
     setAgentIcons((prev) => {
@@ -87,7 +131,15 @@ export default function Home() {
   }
 
   // Persist gateways whenever the list changes
+  const gatewaysInitialized = useRef(false);
   useEffect(() => {
+    // Skip the initial SSR default — only persist after hydration
+    if (!gatewaysInitialized.current) {
+      if (gateways !== SSR_DEFAULT_GATEWAYS) {
+        gatewaysInitialized.current = true;
+      }
+      return;
+    }
     saveGateways(gateways);
   }, [gateways]);
 
@@ -216,24 +268,9 @@ export default function Home() {
     (async () => {
       const { invoke } = await import("@tauri-apps/api/core");
 
-      // Auto-detect default gateway config
-      try {
-        const detected = await invoke<string | null>("detect_config");
-        if (!cancelled && detected) {
-          const detectedType = detected === "~/.openclaw" ? "local" as const : "docker" as const;
-          setGateways((prev) =>
-            prev.map((g) =>
-              g.id === "default" && !g.configured
-                ? { ...g, rootDir: detected, type: detectedType, configured: true, serviceState: "loading" }
-                : g
-            )
-          );
-        }
-      } catch { /* no existing config */ }
-
       if (cancelled) return;
 
-      // Now check health for every configured gateway — sequentially to avoid flooding
+      // Check health for every configured gateway — sequentially to avoid flooding
       setGateways((prev) => {
         (async () => {
           for (const gw of prev) {
@@ -606,7 +643,7 @@ export default function Home() {
           browserRunning={false}
           onSave={() => {
             setSharedDir(settingsDraft);
-            localStorage.setItem(SHARED_DIR_STORAGE_KEY, settingsDraft);
+            saveSharedDir(settingsDraft);
             setSettingsModal(false);
           }}
           onClose={() => setSettingsModal(false)}

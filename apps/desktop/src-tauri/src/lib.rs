@@ -178,9 +178,9 @@ async fn open_url_in_window(app: tauri::AppHandle, url: String, title: String) -
 }
 
 #[tauri::command]
-async fn export_text_to_pdf(app: tauri::AppHandle, text: String) -> Result<String, String> {
+async fn export_text_to_pdf(_app: tauri::AppHandle, text: String) -> Result<String, String> {
     use rfd::AsyncFileDialog;
-    
+
     // 让用户选择保存位置
     let file_handle = AsyncFileDialog::new()
         .set_title("Save PDF")
@@ -188,70 +188,41 @@ async fn export_text_to_pdf(app: tauri::AppHandle, text: String) -> Result<Strin
         .add_filter("PDF", &["pdf"])
         .save_file()
         .await;
-    
+
     let file_path = match file_handle {
         Some(h) => h.path().to_string_lossy().to_string(),
         None => return Err("Cancelled".to_string()),
     };
-    
-    // 使用 printpdf 生成 PDF（需要添加依赖）
-    // 这里简化处理：使用 HTML 转 PDF 的方式
-    let html = format!(
-        r#"<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="UTF-8">
-    <style>
-        body {{
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-            padding: 40px;
-            line-height: 1.6;
-            color: #333;
-        }}
-        pre {{
-            white-space: pre-wrap;
-            word-wrap: break-word;
-        }}
-    </style>
-</head>
-<body>
-    <pre>{}</pre>
-</body>
-</html>"#,
-        text.replace("&", "&amp;")
-            .replace("<", "&lt;")
-            .replace(">", "&gt;")
-    );
-    
-    // 保存 HTML 文件
-    let html_path = format!("{}.html", file_path.trim_end_matches(".pdf"));
-    std::fs::write(&html_path, html).map_err(|e| e.to_string())?;
-    
-    // 使用系统命令转 PDF（macOS 使用 cupsfilter，其他平台使用 wkhtmltopdf）
+
+    // 保存为纯文本文件，cupsfilter 原生支持 text/plain -> PDF
+    let txt_path = format!("{}.txt", file_path.trim_end_matches(".pdf"));
+    std::fs::write(&txt_path, &text).map_err(|e| e.to_string())?;
+
     #[cfg(target_os = "macos")]
     {
-        let output = std::process::Command::new("cupsfilter")
-            .arg(&html_path)
-            .arg("-o")
-            .arg(&format!("output={}", file_path))
+        let output = std::process::Command::new("/usr/sbin/cupsfilter")
+            .arg("-m")
+            .arg("application/pdf")
+            .arg(&txt_path)
             .output()
             .map_err(|e| e.to_string())?;
-        
-        // 删除临时 HTML 文件
-        let _ = std::fs::remove_file(&html_path);
-        
+
+        // 删除临时文本文件
+        let _ = std::fs::remove_file(&txt_path);
+
         if output.status.success() {
+            // cupsfilter 将 PDF 输出到 stdout
+            std::fs::write(&file_path, &output.stdout).map_err(|e| e.to_string())?;
             Ok(file_path)
         } else {
             Err(format!("PDF conversion failed: {}", String::from_utf8_lossy(&output.stderr)))
         }
     }
-    
+
     #[cfg(not(target_os = "macos"))]
     {
-        // 其他平台：提示用户安装 wkhtmltopdf
-        let _ = std::fs::remove_file(&html_path);
-        Err("PDF export is currently only supported on macOS. Please install wkhtmltopdf for other platforms.".to_string())
+        let _ = std::fs::remove_file(&txt_path);
+        Err("PDF export is currently only supported on macOS.".to_string())
     }
 }
 
@@ -351,6 +322,24 @@ pub fn run() {
             claw_ui_bridge::toggle_agent_allowed,
             claw_ui_bridge::read_scheduled_tasks,
             claw_ui_bridge::write_scheduled_tasks,
+            claw_ui_bridge::migrate_pond_dir,
+            claw_ui_bridge::db_get_setting,
+            claw_ui_bridge::db_set_setting,
+            claw_ui_bridge::db_delete_setting,
+            claw_ui_bridge::db_load_gateways,
+            claw_ui_bridge::db_save_gateways,
+            claw_ui_bridge::db_load_agent_icons,
+            claw_ui_bridge::db_save_agent_icons,
+            claw_ui_bridge::db_load_messages,
+            claw_ui_bridge::db_append_messages,
+            claw_ui_bridge::db_update_message,
+            claw_ui_bridge::db_save_all_messages,
+            claw_ui_bridge::db_record_usage,
+            claw_ui_bridge::db_get_daily_usage,
+            claw_ui_bridge::db_get_hourly_usage,
+            claw_ui_bridge::db_persist_usage_bulk,
+            claw_ui_bridge::db_prune_old_usage,
+            claw_ui_bridge::db_migrate_from_localstorage,
         ])
         .setup(|app| {
             if cfg!(debug_assertions) {

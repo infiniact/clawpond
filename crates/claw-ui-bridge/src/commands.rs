@@ -1,7 +1,9 @@
 use crate::AppState;
+use crate::db;
 use claw_export::PondSnapshot;
 use clawking::GatewayConfig;
 use serde::Serialize;
+use std::collections::HashMap;
 use tauri::{AppHandle, Emitter, State};
 
 #[derive(Serialize)]
@@ -348,6 +350,45 @@ pub fn detect_config() -> Option<String> {
         }
     }
     None
+}
+
+/// Migrate a pond gateway directory from a legacy location to the new ~/.openclaw/workspace/pond/ path.
+/// Moves the directory and rewrites absolute paths in .env.
+#[tauri::command]
+pub fn migrate_pond_dir(old_root_dir: String, new_root_dir: String) -> Result<(), String> {
+    let old_expanded = shellexpand::tilde(&old_root_dir).to_string();
+    let new_expanded = shellexpand::tilde(&new_root_dir).to_string();
+    let old_path = std::path::Path::new(&old_expanded);
+    let new_path = std::path::Path::new(&new_expanded);
+
+    if !old_path.exists() {
+        return Err(format!("Source directory does not exist: {}", old_expanded));
+    }
+    if new_path.exists() {
+        return Err(format!("Target directory already exists: {}", new_expanded));
+    }
+
+    // Ensure parent of new path exists
+    if let Some(parent) = new_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create parent directory: {}", e))?;
+    }
+
+    // Move the directory
+    std::fs::rename(old_path, new_path)
+        .map_err(|e| format!("Failed to move directory: {}", e))?;
+
+    // Rewrite .env: replace old absolute paths with new ones
+    let env_path = new_path.join(".env");
+    if env_path.exists() {
+        let content = std::fs::read_to_string(&env_path)
+            .map_err(|e| format!("Failed to read .env: {}", e))?;
+        let updated = content.replace(&old_expanded, &new_expanded);
+        std::fs::write(&env_path, updated)
+            .map_err(|e| format!("Failed to write .env: {}", e))?;
+    }
+
+    Ok(())
 }
 
 /// Read gateway connection info (port + token) from the .env file in the root dir.
@@ -849,7 +890,162 @@ pub fn toggle_agent_allowed(root_dir: String, agent_name: String, allow: bool) -
     Ok(())
 }
 
-/// Add an agent to `openclaw.json` `agents.list[]` and to the main agent's
+// ── SQLite DB commands ──
+
+#[tauri::command]
+pub fn db_get_setting(key: String, state: State<AppState>) -> Result<Option<String>, String> {
+    let guard = state.db()?;
+    let conn = guard.as_ref().unwrap();
+    db::get_setting(&conn, &key).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn db_set_setting(key: String, value: String, state: State<AppState>) -> Result<(), String> {
+    let guard = state.db()?;
+    let conn = guard.as_ref().unwrap();
+    db::set_setting(&conn, &key, &value).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn db_delete_setting(key: String, state: State<AppState>) -> Result<(), String> {
+    let guard = state.db()?;
+    let conn = guard.as_ref().unwrap();
+    db::delete_setting(&conn, &key).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn db_load_gateways(state: State<AppState>) -> Result<Vec<db::StoredGateway>, String> {
+    let guard = state.db()?;
+    let conn = guard.as_ref().unwrap();
+    db::load_gateways(&conn).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn db_save_gateways(gateways: Vec<db::StoredGateway>, state: State<AppState>) -> Result<(), String> {
+    let guard = state.db()?;
+    let conn = guard.as_ref().unwrap();
+    db::save_gateways(&conn, &gateways).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn db_load_agent_icons(state: State<AppState>) -> Result<HashMap<String, String>, String> {
+    let guard = state.db()?;
+    let conn = guard.as_ref().unwrap();
+    db::load_agent_icons(&conn).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn db_save_agent_icons(icons: HashMap<String, String>, state: State<AppState>) -> Result<(), String> {
+    let guard = state.db()?;
+    let conn = guard.as_ref().unwrap();
+    db::save_agent_icons(&conn, &icons).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn db_load_messages(
+    root_dir: String,
+    offset: i64,
+    limit: i64,
+    state: State<AppState>,
+) -> Result<db::LoadMessagesResult, String> {
+    let guard = state.db()?;
+    let conn = guard.as_ref().unwrap();
+    db::load_messages(&conn, &root_dir, offset, limit).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn db_append_messages(
+    root_dir: String,
+    messages: Vec<db::ChatMessage>,
+    state: State<AppState>,
+) -> Result<(), String> {
+    let guard = state.db()?;
+    let conn = guard.as_ref().unwrap();
+    db::append_messages(&conn, &root_dir, &messages).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn db_update_message(
+    root_dir: String,
+    id: String,
+    updates: db::ChatMessage,
+    state: State<AppState>,
+) -> Result<(), String> {
+    let guard = state.db()?;
+    let conn = guard.as_ref().unwrap();
+    db::update_message(&conn, &root_dir, &id, &updates).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn db_save_all_messages(
+    root_dir: String,
+    messages: Vec<db::ChatMessage>,
+    state: State<AppState>,
+) -> Result<(), String> {
+    let guard = state.db()?;
+    let conn = guard.as_ref().unwrap();
+    db::save_all_messages(&conn, &root_dir, &messages).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn db_record_usage(
+    gateway_id: String,
+    tokens: i64,
+    state: State<AppState>,
+) -> Result<(), String> {
+    let guard = state.db()?;
+    let conn = guard.as_ref().unwrap();
+    db::record_usage(&conn, &gateway_id, tokens).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn db_get_daily_usage(
+    gateway_id: String,
+    days: i32,
+    state: State<AppState>,
+) -> Result<Vec<db::DayUsage>, String> {
+    let guard = state.db()?;
+    let conn = guard.as_ref().unwrap();
+    db::get_daily_usage(&conn, &gateway_id, days).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn db_get_hourly_usage(
+    gateway_id: String,
+    state: State<AppState>,
+) -> Result<Vec<db::HourUsage>, String> {
+    let guard = state.db()?;
+    let conn = guard.as_ref().unwrap();
+    db::get_today_hourly_usage(&conn, &gateway_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn db_persist_usage_bulk(
+    gateway_id: String,
+    hour_totals: HashMap<String, i64>,
+    state: State<AppState>,
+) -> Result<(), String> {
+    let guard = state.db()?;
+    let conn = guard.as_ref().unwrap();
+    db::persist_usage_bulk(&conn, &gateway_id, &hour_totals).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn db_prune_old_usage(state: State<AppState>) -> Result<(), String> {
+    let guard = state.db()?;
+    let conn = guard.as_ref().unwrap();
+    db::prune_old_usage(&conn).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn db_migrate_from_localstorage(
+    payload: db::MigrationPayload,
+    state: State<AppState>,
+) -> Result<(), String> {
+    let guard = state.db()?;
+    let conn = guard.as_ref().unwrap();
+    db::migrate_from_payload(&conn, &payload).map_err(|e| e.to_string())
+}
 /// `subagents.allowAgents[]`. Uses defaults from `agents.defaults` for model.
 #[tauri::command]
 pub fn add_workspace_agent(root_dir: String, agent_name: String) -> Result<(), String> {

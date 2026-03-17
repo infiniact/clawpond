@@ -692,11 +692,13 @@ function ChatView({ rootDir, serviceState, lastError, startProgress, hidden, gat
   // Load persisted messages on mount / rootDir change
   useEffect(() => {
     if (!rootDir) return;
-    const { messages: stored, hasMore: more } = loadMessages(rootDir, 0);
-    setMessages(stored.map(fromStored));
-    setHasMore(more);
-    setLoadedOffset(stored.length);
-    needsInitialScroll.current = true;
+    (async () => {
+      const { messages: stored, hasMore: more } = await loadMessages(rootDir, 0);
+      setMessages(stored.map(fromStored));
+      setHasMore(more);
+      setLoadedOffset(stored.length);
+      needsInitialScroll.current = true;
+    })();
   }, [rootDir]);
 
   // Scroll to bottom after messages are rendered on initial load.
@@ -741,13 +743,13 @@ function ChatView({ rootDir, serviceState, lastError, startProgress, hidden, gat
   }, [messages, rootDir]);
 
   // Load more (older) messages
-  const handleLoadMore = useCallback(() => {
+  const handleLoadMore = useCallback(async () => {
     if (!rootDir || !hasMore || loadingMore) return;
     setLoadingMore(true);
     const scrollEl = scrollRef.current;
     const prevScrollHeight = scrollEl?.scrollHeight || 0;
 
-    const { messages: older, hasMore: more } = loadMessages(rootDir, loadedOffset);
+    const { messages: older, hasMore: more } = await loadMessages(rootDir, loadedOffset);
     setMessages((prev) => {
       // Deduplicate by id
       const existingIds = new Set(prev.map((m) => m.id));
@@ -2293,6 +2295,8 @@ function MessageBubble({
   const bubbleRef = useRef<HTMLDivElement>(null);
   const [popup, setPopup] = useState<{ x: number; y: number; text: string } | null>(null);
   const popupRef = useRef<HTMLDivElement>(null);
+  const [actionLoading, setActionLoading] = useState<"pdf" | "wechat" | null>(null);
+  const [toast, setToast] = useState<{ message: string; type: "success" | "error" } | null>(null);
 
   // Show popup on mouseup when text is selected
   const handleMouseUp = useCallback(() => {
@@ -2328,10 +2332,16 @@ function MessageBubble({
     return () => document.removeEventListener("mousedown", handler);
   }, [popup]);
 
+  const showToast = useCallback((message: string, type: "success" | "error") => {
+    setToast({ message, type });
+    setTimeout(() => setToast(null), 2500);
+  }, []);
+
   const handleCopyMessage = useCallback(() => {
-    navigator.clipboard.writeText(msg.content);
+    navigator.clipboard.writeText(popup?.text || msg.content);
+    showToast("已复制到剪贴板", "success");
     setPopup(null);
-  }, [msg.content]);
+  }, [msg.content, popup, showToast]);
 
   const handleAddToContext = useCallback(() => {
     if (popup) {
@@ -2343,28 +2353,40 @@ function MessageBubble({
 
   const handleExportPDF = useCallback(async () => {
     const textToExport = popup?.text || msg.content;
+    setActionLoading("pdf");
     try {
       const { invoke } = await import("@tauri-apps/api/core");
       await invoke("export_text_to_pdf", { text: textToExport });
+      showToast("PDF 导出成功", "success");
       setPopup(null);
       window.getSelection()?.removeAllRanges();
     } catch (err) {
+      const errMsg = String(err);
+      if (!errMsg.includes("Cancelled")) {
+        showToast("导出失败: " + errMsg, "error");
+      }
       console.error("Failed to export PDF:", err);
+    } finally {
+      setActionLoading(null);
     }
-  }, [popup, msg.content]);
+  }, [popup, msg.content, showToast]);
 
   const handleWeChatShare = useCallback(async () => {
     const textToShare = popup?.text || msg.content;
+    setActionLoading("wechat");
     try {
       const { invoke } = await import("@tauri-apps/api/core");
       await invoke("share_to_wechat", { text: textToShare });
+      showToast("已复制并打开微信", "success");
       setPopup(null);
       window.getSelection()?.removeAllRanges();
     } catch (err) {
+      showToast("微信分享失败: " + String(err), "error");
       console.error("Failed to share to WeChat:", err);
-      alert(err);
+    } finally {
+      setActionLoading(null);
     }
-  }, [popup, msg.content]);
+  }, [popup, msg.content, showToast]);
 
   return (
     <div className={`flex gap-3 ${msg.role === "user" ? "justify-end" : ""}`}>
@@ -2380,10 +2402,39 @@ function MessageBubble({
           )}
         </div>
       )}
+      <div className="group relative max-w-[75%]">
+        {/* Action buttons above the bubble */}
+        {msg.role === "assistant" && !msg.streaming && (
+          <div className="mb-1 flex justify-end gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
+            <button
+              onClick={handleCopyMessage}
+              className="flex h-5 w-5 items-center justify-center rounded-md text-text-ghost transition-colors hover:bg-bg-hover hover:text-text-secondary"
+              title="复制"
+            >
+              <IconCopy size={11} />
+            </button>
+            <button
+              onClick={handleExportPDF}
+              disabled={actionLoading !== null}
+              className="flex h-5 w-5 items-center justify-center rounded-md text-text-ghost transition-colors hover:bg-bg-hover hover:text-text-secondary disabled:opacity-50"
+              title="导出 PDF"
+            >
+              {actionLoading === "pdf" ? <IconSpinner size={11} /> : <IconFile size={11} />}
+            </button>
+            <button
+              onClick={handleWeChatShare}
+              disabled={actionLoading !== null}
+              className="flex h-5 w-5 items-center justify-center rounded-md text-text-ghost transition-colors hover:bg-bg-hover hover:text-text-secondary disabled:opacity-50"
+              title="微信分享"
+            >
+              {actionLoading === "wechat" ? <IconSpinner size={11} /> : <IconShare size={11} />}
+            </button>
+          </div>
+        )}
       <div
         ref={bubbleRef}
         onMouseUp={handleMouseUp}
-        className={`relative max-w-[75%] overflow-hidden rounded-xl px-3.5 py-2.5 text-[13px] leading-relaxed break-words ${
+        className={`relative overflow-hidden rounded-xl px-3.5 py-2.5 text-[13px] leading-relaxed break-words ${
           msg.role === "user"
             ? "bg-accent-emerald/15 text-text-primary ring-1 ring-accent-emerald/20 whitespace-pre-wrap"
             : msg.sourceGateway
@@ -2458,6 +2509,15 @@ function MessageBubble({
             </button>
           </div>
         )}
+      </div>
+      {/* Toast notification */}
+      {toast && (
+        <div className={`mt-1 rounded-md px-2.5 py-1 text-[11px] font-medium ${
+          toast.type === "success" ? "bg-accent-emerald/10 text-accent-emerald" : "bg-accent-red/10 text-accent-red"
+        }`}>
+          {toast.message}
+        </div>
+      )}
       </div>
       {/* Timestamp */}
       <div className={`mt-0.5 text-[9px] text-text-ghost ${msg.role === "user" ? "text-right" : ""}`}>

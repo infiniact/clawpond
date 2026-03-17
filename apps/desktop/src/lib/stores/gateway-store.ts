@@ -1,3 +1,5 @@
+import { invoke } from "@tauri-apps/api/core";
+
 export type ServiceState = "unconfigured" | "loading" | "starting" | "stopping" | "running" | "error" | "stopped";
 
 export type ComposeStartProgress = {
@@ -36,47 +38,88 @@ export type StoredGateway = {
   configured: boolean;
 };
 
+/** DB-side stored gateway shape (snake_case fields from Rust) */
+type DbStoredGateway = {
+  id: string;
+  name: string;
+  emoji: string;
+  gw_type: string;
+  root_dir: string | null;
+  configured: boolean;
+};
+
 export const GATEWAYS_STORAGE_KEY = "clawpond-gateways";
 export const AGENT_ICONS_STORAGE_KEY = "clawpond-agent-icons";
 
-export function loadAgentIcons(): Record<string, string> {
+export async function loadAgentIcons(): Promise<Record<string, string>> {
   try {
-    const raw = localStorage.getItem(AGENT_ICONS_STORAGE_KEY);
-    if (raw) return JSON.parse(raw);
-  } catch { /* ignore */ }
-  return {};
+    return await invoke<Record<string, string>>("db_load_agent_icons");
+  } catch { return {}; }
 }
 
-export function saveAgentIcons(icons: Record<string, string>) {
-  localStorage.setItem(AGENT_ICONS_STORAGE_KEY, JSON.stringify(icons));
+export async function saveAgentIcons(icons: Record<string, string>) {
+  await invoke("db_save_agent_icons", { icons });
 }
 
-export function loadGateways(): Gateway[] {
+/** Migrate legacy pond rootDir paths to the new ~/.openclaw/workspace/pond/ location */
+function migrateRootDir(rootDir: string | null): string | null {
+  if (!rootDir) return rootDir;
+  const legacyPatterns = [
+    /^~\/clawpond\/clawking\/pond\//,
+    /^~\/clawpond\/pond\//,
+  ];
+  for (const pat of legacyPatterns) {
+    if (pat.test(rootDir)) {
+      return rootDir.replace(pat, "~/.openclaw/workspace/pond/");
+    }
+  }
+  return rootDir;
+}
+
+/** Load gateways from SQLite and return migration pairs (old → new rootDir) for file migration */
+export async function loadGatewaysWithMigration(): Promise<{ gateways: Gateway[]; migrations: Array<{ oldDir: string; newDir: string }> }> {
+  const migrations: Array<{ oldDir: string; newDir: string }> = [];
   try {
-    const raw = localStorage.getItem(GATEWAYS_STORAGE_KEY);
-    if (raw) {
-      const stored: StoredGateway[] = JSON.parse(raw);
-      if (Array.isArray(stored) && stored.length > 0) {
-        return stored.map((g) => ({
-          ...g,
-          // Default gateway (ClawKing) is always local; others are docker
-          type: g.id === "default" ? "local" as const : (g.type || "docker" as const),
-          rootDir: g.id === "default" ? "~/.openclaw" : g.rootDir,
+    const dbGateways = await invoke<DbStoredGateway[]>("db_load_gateways");
+    if (Array.isArray(dbGateways) && dbGateways.length > 0) {
+      let migrated = false;
+      const gateways = dbGateways.map((g) => {
+        const rootDir = g.root_dir;
+        const gwType = g.gw_type as GatewayType;
+        const newRootDir = g.id === "default" ? "~/.openclaw" : migrateRootDir(rootDir);
+        if (newRootDir !== rootDir && rootDir && newRootDir) {
+          migrated = true;
+          migrations.push({ oldDir: rootDir, newDir: newRootDir });
+        }
+        return {
+          id: g.id,
+          name: g.name,
+          emoji: g.emoji,
+          type: g.id === "default" ? "local" as const : (gwType || "docker" as const),
+          rootDir: newRootDir,
+          configured: g.configured,
           serviceState: !g.configured
             ? "unconfigured" as const
             : "loading" as const,
-        }));
+        };
+      });
+      if (migrated) {
+        await saveGateways(gateways);
       }
+      return { gateways, migrations };
     }
   } catch { /* ignore */ }
-  return [
-    { id: "default", name: "ClawKing", emoji: "\u{1F99E}", type: "local", rootDir: "~/.openclaw", configured: false, serviceState: "unconfigured" },
-  ];
+  return {
+    gateways: [
+      { id: "default", name: "ClawKing", emoji: "\u{1F99E}", type: "local", rootDir: "~/.openclaw", configured: false, serviceState: "unconfigured" },
+    ],
+    migrations: [],
+  };
 }
 
-export function saveGateways(gateways: Gateway[]) {
-  const stored: StoredGateway[] = gateways.map(({ id, name, emoji, type, rootDir, configured }) => ({
-    id, name, emoji, type, rootDir, configured,
+export async function saveGateways(gateways: Gateway[]) {
+  const stored = gateways.map(({ id, name, emoji, type, rootDir, configured }) => ({
+    id, name, emoji, gw_type: type, root_dir: rootDir, configured,
   }));
-  localStorage.setItem(GATEWAYS_STORAGE_KEY, JSON.stringify(stored));
+  await invoke("db_save_gateways", { gateways: stored });
 }

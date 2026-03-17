@@ -1,6 +1,7 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { useRpcPool } from "../lib/rpc/rpc-pool-context";
 import { getDailyUsage, getTodayHourlyUsage, type DayUsage, type HourUsage } from "../lib/stores/usage-store";
 
@@ -52,7 +53,7 @@ type SessionEntry = {
   [key: string]: unknown;
 };
 
-/** Aggregate sessions.list data into daily and hourly buckets, and persist to localStorage */
+/** Aggregate sessions.list data into daily and hourly buckets, and persist to DB */
 function aggregateSessions(sessions: SessionEntry[], gatewayId: string): { daily: DayUsage[]; hourly: HourUsage[] } {
   const dailyMap = new Map<string, number>();
   const hourlyMap = new Map<number, number>();
@@ -68,7 +69,7 @@ function aggregateSessions(sessions: SessionEntry[], gatewayId: string): { daily
   // Initialize 24 hours
   for (let h = 0; h < 24; h++) hourlyMap.set(h, 0);
 
-  // Collect per-hourKey totals so we can write them to localStorage
+  // Collect per-hourKey totals so we can write them to DB
   const hourKeyTotals = new Map<string, number>();
 
   // Deduplicate sessions by sessionKey or sessionId
@@ -91,7 +92,7 @@ function aggregateSessions(sessions: SessionEntry[], gatewayId: string): { daily
     const dk = dayKey(date);
     const hk = hourKey(date);
 
-    // Accumulate for localStorage persistence
+    // Accumulate for DB persistence
     hourKeyTotals.set(hk, (hourKeyTotals.get(hk) || 0) + tokens);
 
     if (dk === todayStr) {
@@ -102,8 +103,8 @@ function aggregateSessions(sessions: SessionEntry[], gatewayId: string): { daily
     }
   }
 
-  // Persist aggregated data to localStorage so it's available as fallback and history
-  persistToLocalStorage(gatewayId, hourKeyTotals);
+  // Persist aggregated data to DB (fire-and-forget)
+  persistToDb(gatewayId, hourKeyTotals);
 
   const daily: DayUsage[] = [];
   for (const [date, tokens] of dailyMap) {
@@ -120,20 +121,14 @@ function aggregateSessions(sessions: SessionEntry[], gatewayId: string): { daily
   return { daily, hourly };
 }
 
-/** Overwrite localStorage usage data with RPC-sourced aggregated data */
-function persistToLocalStorage(gatewayId: string, hourKeyTotals: Map<string, number>) {
-  const STORAGE_KEY = "clawpond_token_usage";
+/** Persist RPC-sourced usage data to SQLite */
+async function persistToDb(gatewayId: string, hourKeyTotals: Map<string, number>) {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    const data: Record<string, Record<string, number>> = raw ? JSON.parse(raw) : {};
-    if (!data[gatewayId]) data[gatewayId] = {};
+    const obj: Record<string, number> = {};
     for (const [hk, tokens] of hourKeyTotals) {
-      // Only overwrite if RPC data is larger (more accurate)
-      if (tokens > (data[gatewayId][hk] || 0)) {
-        data[gatewayId][hk] = tokens;
-      }
+      obj[hk] = tokens;
     }
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+    await invoke("db_persist_usage_bulk", { gatewayId, hourTotals: obj });
   } catch { /* ignore */ }
 }
 
@@ -145,6 +140,12 @@ export function UsageHeatmap({ gatewayId }: { gatewayId: string }) {
   const [hourlyUsage, setHourlyUsage] = useState<HourUsage[]>([]);
   const [hoveredItem, setHoveredItem] = useState<string | null>(null);
   const [totalRange, setTotalRange] = useState<"7d" | "30d">("7d");
+  const [mounted, setMounted] = useState(false);
+
+  // Only render date-dependent content after mount (client-side only)
+  useEffect(() => {
+    setMounted(true);
+  }, []);
 
   const fetchFromRpc = useCallback(async (): Promise<boolean> => {
     const gw = gateways.find((g) => g.id === gatewayId);
@@ -175,10 +176,12 @@ export function UsageHeatmap({ gatewayId }: { gatewayId: string }) {
     }
   }, [gatewayId, gateways, pool]);
 
-  // Initial load from localStorage, then auto-refresh from RPC
+  // Initial load from DB, then auto-refresh from RPC
   useEffect(() => {
-    setDailyUsage(getDailyUsage(gatewayId, 6));
-    setHourlyUsage(getTodayHourlyUsage(gatewayId));
+    (async () => {
+      setDailyUsage(await getDailyUsage(gatewayId, 6));
+      setHourlyUsage(await getTodayHourlyUsage(gatewayId));
+    })();
 
     // Fetch from RPC immediately, then periodically
     fetchFromRpc();
@@ -189,21 +192,34 @@ export function UsageHeatmap({ gatewayId }: { gatewayId: string }) {
     return () => clearInterval(timer);
   }, [gatewayId, fetchFromRpc]);
 
-  const currentHour = new Date().getHours();
+  // Use state for currentHour to avoid hydration mismatch
+  const [currentHour, setCurrentHour] = useState(0);
+  useEffect(() => {
+    setCurrentHour(new Date().getHours());
+  }, []);
 
-  // Calculate total based on selected range
-  const rangeTotal = (() => {
+  // Calculate total based on selected range — only compute after mount
+  const [rangeTotal, setRangeTotal] = useState(0);
+  useEffect(() => {
+    if (!mounted) return;
     const todayTokens = hourlyUsage.reduce((sum, h) => sum + h.tokens, 0);
     if (totalRange === "7d") {
-      return dailyUsage.reduce((sum, d) => sum + d.tokens, 0) + todayTokens;
+      setRangeTotal(dailyUsage.reduce((sum, d) => sum + d.tokens, 0) + todayTokens);
+    } else {
+      // 30d: read from DB for the full 30-day range
+      getDailyUsage(gatewayId, 30).then((monthly) => {
+        setRangeTotal(monthly.reduce((sum, d) => sum + d.tokens, 0) + todayTokens);
+      });
     }
-    // 30d: read from localStorage for the full 30-day range
-    const monthly = getDailyUsage(gatewayId, 30);
-    return monthly.reduce((sum, d) => sum + d.tokens, 0) + todayTokens;
-  })();
+  }, [mounted, hourlyUsage, dailyUsage, totalRange, gatewayId]);
 
   return (
     <div className="relative flex items-center gap-1.5 overflow-visible">
+      {/* Don't render date-dependent content until mounted on client */}
+      {!mounted ? (
+        <div className="h-[18px] w-[200px]" /> /* Placeholder to prevent layout shift */
+      ) : (
+        <>
       {/* Total badge — click to toggle 7d/30d */}
       <div
         className="relative flex flex-col items-center"
@@ -280,6 +296,8 @@ export function UsageHeatmap({ gatewayId }: { gatewayId: string }) {
           </div>
         );
       })}
+        </>
+      )}
     </div>
   );
 }
