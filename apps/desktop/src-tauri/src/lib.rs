@@ -177,12 +177,128 @@ async fn open_url_in_window(app: tauri::AppHandle, url: String, title: String) -
     Ok(())
 }
 
+#[tauri::command]
+async fn export_text_to_pdf(app: tauri::AppHandle, text: String) -> Result<String, String> {
+    use rfd::AsyncFileDialog;
+    
+    // 让用户选择保存位置
+    let file_handle = AsyncFileDialog::new()
+        .set_title("Save PDF")
+        .set_file_name("export.pdf")
+        .add_filter("PDF", &["pdf"])
+        .save_file()
+        .await;
+    
+    let file_path = match file_handle {
+        Some(h) => h.path().to_string_lossy().to_string(),
+        None => return Err("Cancelled".to_string()),
+    };
+    
+    // 使用 printpdf 生成 PDF（需要添加依赖）
+    // 这里简化处理：使用 HTML 转 PDF 的方式
+    let html = format!(
+        r#"<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <style>
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            padding: 40px;
+            line-height: 1.6;
+            color: #333;
+        }}
+        pre {{
+            white-space: pre-wrap;
+            word-wrap: break-word;
+        }}
+    </style>
+</head>
+<body>
+    <pre>{}</pre>
+</body>
+</html>"#,
+        text.replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+    );
+    
+    // 保存 HTML 文件
+    let html_path = format!("{}.html", file_path.trim_end_matches(".pdf"));
+    std::fs::write(&html_path, html).map_err(|e| e.to_string())?;
+    
+    // 使用系统命令转 PDF（macOS 使用 cupsfilter，其他平台使用 wkhtmltopdf）
+    #[cfg(target_os = "macos")]
+    {
+        let output = std::process::Command::new("cupsfilter")
+            .arg(&html_path)
+            .arg("-o")
+            .arg(&format!("output={}", file_path))
+            .output()
+            .map_err(|e| e.to_string())?;
+        
+        // 删除临时 HTML 文件
+        let _ = std::fs::remove_file(&html_path);
+        
+        if output.status.success() {
+            Ok(file_path)
+        } else {
+            Err(format!("PDF conversion failed: {}", String::from_utf8_lossy(&output.stderr)))
+        }
+    }
+    
+    #[cfg(not(target_os = "macos"))]
+    {
+        // 其他平台：提示用户安装 wkhtmltopdf
+        let _ = std::fs::remove_file(&html_path);
+        Err("PDF export is currently only supported on macOS. Please install wkhtmltopdf for other platforms.".to_string())
+    }
+}
+
+#[tauri::command]
+async fn share_to_wechat(app: tauri::AppHandle, text: String) -> Result<(), String> {
+    // 将文本复制到剪贴板
+    use tauri_plugin_clipboard_manager::ClipboardExt;
+    
+    app.clipboard()
+        .write_text(&text)
+        .map_err(|e| e.to_string())?;
+    
+    // macOS: 打开微信
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg("-a")
+            .arg("WeChat")
+            .spawn()
+            .map_err(|e| format!("Failed to open WeChat: {}", e))?;
+    }
+    
+    // Windows: 打开微信
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("cmd")
+            .args(["/C", "start", "WeChat"])
+            .spawn()
+            .map_err(|e| format!("Failed to open WeChat: {}", e))?;
+    }
+    
+    // Linux: 提示用户
+    #[cfg(target_os = "linux")]
+    {
+        return Err("Please manually paste and share in WeChat. Text has been copied to clipboard.".to_string());
+    }
+    
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     fix_path_env();
 
     tauri::Builder::default()
         .manage(AppState::new())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .invoke_handler(tauri::generate_handler![
             pick_directory,
             pick_files,
@@ -191,6 +307,8 @@ pub fn run() {
             remove_directory,
             detect_platform,
             open_url_in_window,
+            export_text_to_pdf,
+            share_to_wechat,
             claw_ui_bridge::connect_master,
             claw_ui_bridge::get_master_status,
             claw_ui_bridge::spawn_gateway,

@@ -22,6 +22,8 @@ import {
   IconImage,
   IconMic,
   IconFile,
+  IconCopy,
+  IconShare,
 } from "../icons";
 import { MentionPopup } from "./mention-popup";
 import { UsageHeatmap } from "../usage-heatmap";
@@ -2339,6 +2341,31 @@ function MessageBubble({
     }
   }, [popup, onAddToContext]);
 
+  const handleExportPDF = useCallback(async () => {
+    const textToExport = popup?.text || msg.content;
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      await invoke("export_text_to_pdf", { text: textToExport });
+      setPopup(null);
+      window.getSelection()?.removeAllRanges();
+    } catch (err) {
+      console.error("Failed to export PDF:", err);
+    }
+  }, [popup, msg.content]);
+
+  const handleWeChatShare = useCallback(async () => {
+    const textToShare = popup?.text || msg.content;
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      await invoke("share_to_wechat", { text: textToShare });
+      setPopup(null);
+      window.getSelection()?.removeAllRanges();
+    } catch (err) {
+      console.error("Failed to share to WeChat:", err);
+      alert(err);
+    }
+  }, [popup, msg.content]);
+
   return (
     <div className={`flex gap-3 ${msg.role === "user" ? "justify-end" : ""}`}>
       {msg.role === "assistant" && (
@@ -2398,6 +2425,30 @@ function MessageBubble({
               transform: "translate(-50%, -100%)",
             }}
           >
+            <button
+              onClick={handleCopyMessage}
+              className="flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium text-accent-emerald transition-colors hover:bg-accent-emerald/15"
+              title="复制"
+            >
+              <IconCopy size={10} />
+              复制
+            </button>
+            <button
+              onClick={handleExportPDF}
+              className="flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium text-text-secondary transition-colors hover:bg-bg-hover"
+              title="导出 PDF"
+            >
+              <IconFile size={10} />
+              PDF
+            </button>
+            <button
+              onClick={handleWeChatShare}
+              className="flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium text-text-secondary transition-colors hover:bg-bg-hover"
+              title="微信分享"
+            >
+              <IconShare size={10} />
+              微信
+            </button>
             <button
               onClick={handleAddToContext}
               className="flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium text-accent-emerald transition-colors hover:bg-accent-emerald/15"
