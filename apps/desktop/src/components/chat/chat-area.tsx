@@ -56,6 +56,13 @@ type Message = {
   agentName?: string;
 };
 
+type QueuedMessage = {
+  id: string;
+  text: string;
+  images: { name: string; mediaType: string; base64: string; containerPath?: string }[];
+  files: { name: string; containerPath: string }[];
+};
+
 /** Extract plain text from content that may be a string, a content block {type,text}, or an array of blocks. */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function textOf(content: any): string {
@@ -472,6 +479,7 @@ function ChatView({ rootDir, serviceState, lastError, startProgress, hidden, gat
   const [restarting, setRestarting] = useState(false);
   const [restartElapsed, setRestartElapsed] = useState(0);
   const [sending, setSending] = useState(false);
+  const messageQueue = useRef<QueuedMessage[]>([]);
 
   // Propagate busy state to parent
   const onBusyChangeRef = useRef(onBusyChange);
@@ -929,7 +937,7 @@ function ChatView({ rootDir, serviceState, lastError, startProgress, hidden, gat
   useEffect(() => {
     const unsub = rpc.onDisconnect((reason) => {
       setConnected(false);
-      setSending(false);
+      finishSending();
       // Clear running agents on disconnect
       if (runningAgentsRef.current.size > 0) {
         runningAgentsRef.current = new Set();
@@ -1067,7 +1075,7 @@ function ChatView({ rootDir, serviceState, lastError, startProgress, hidden, gat
           // so it can match the existing message instead of creating a duplicate.
           // Only stop the sending indicator; if chat.final never arrives,
           // a safety timeout will clean up.
-          setSending(false);
+          finishSending();
           // Safety: if chat.final doesn't arrive within 5s, clean up refs
           const staleId = streamMsgId.current;
           setTimeout(() => {
@@ -1105,7 +1113,7 @@ function ChatView({ rootDir, serviceState, lastError, startProgress, hidden, gat
         streamBuf.current = "";
         streamMsgId.current = null;
         streamSource.current = null;
-        setSending(false);
+        finishSending();
 
         // Track token usage
         if (content) {
@@ -1173,7 +1181,7 @@ function ChatView({ rootDir, serviceState, lastError, startProgress, hidden, gat
         streamBuf.current = "";
         streamMsgId.current = null;
         streamSource.current = null;
-        setSending(false);
+        finishSending();
       }
 
       // ── Chat aborted ──
@@ -1187,7 +1195,7 @@ function ChatView({ rootDir, serviceState, lastError, startProgress, hidden, gat
         streamBuf.current = "";
         streamMsgId.current = null;
         streamSource.current = null;
-        setSending(false);
+        finishSending();
       }
 
       // ── Exec approval requested ──
@@ -1395,12 +1403,153 @@ function ChatView({ rootDir, serviceState, lastError, startProgress, hidden, gat
   }
   forwardRef.current = forwardToGateway;
 
+  // ── Message queue: merge and send queued messages ──
+
+  function mergeQueuedMessages(queue: QueuedMessage[]): QueuedMessage {
+    return {
+      id: `merged-${Date.now()}`,
+      text: queue.map((q) => q.text).filter(Boolean).join("\n\n"),
+      images: queue.flatMap((q) => q.images),
+      files: queue.flatMap((q) => q.files),
+    };
+  }
+
+  /** Send a message directly (bypasses queue check). Used for merged queued messages. */
+  async function sendDirect(merged: QueuedMessage) {
+    const text = merged.text.trim();
+    const images = merged.images;
+    const files = merged.files;
+    if (!text && images.length === 0 && files.length === 0) return;
+
+    // Append file paths
+    const fileSuffix = files.length > 0
+      ? "\n\n" + files.map((f) => `[File: ${f.containerPath}]`).join("\n")
+      : "";
+    const imagePaths = images.filter((img) => img.containerPath);
+    const imageFileSuffix = imagePaths.length > 0
+      ? "\n\n" + imagePaths.map((img) => `[Image: ${img.containerPath}]`).join("\n")
+      : "";
+    const fullText = (text + fileSuffix + imageFileSuffix).trim();
+
+    // Build display content
+    const filePart = files.length > 0 ? `[${files.length} file(s)]` : "";
+    const imgPart = images.length > 0 ? `[${images.length} image(s)]` : "";
+    const attachParts = [imgPart, filePart].filter(Boolean).join(" ");
+    const displayContent = attachParts
+      ? (text ? `${attachParts} ${text}` : attachParts)
+      : text;
+
+    const userMsg: Message = {
+      id: `u-${Date.now()}`,
+      role: "user",
+      content: displayContent,
+      timestamp: new Date(),
+    };
+    setMessages((prev) => [...prev, userMsg]);
+
+    setSending(true);
+    streamBuf.current = "";
+    streamMsgId.current = null;
+    streamSource.current = null;
+
+    recordUsage(gatewayId, estimateTokens(fullText));
+
+    const idempotencyKey = `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const baseParams = {
+      sessionKey: sessionKey.current,
+      idempotencyKey,
+    };
+
+    try {
+      let result: unknown;
+
+      if (images.length > 0) {
+        const support = await probeImageSupport();
+        if (support === "content") {
+          const contentBlocks: object[] = images.map((img) => ({
+            type: "image",
+            source: { type: "base64", media_type: img.mediaType, data: img.base64 },
+          }));
+          contentBlocks.push({ type: "text", text: fullText || "Please describe this image." });
+          result = await rpc.call("chat.send", { ...baseParams, content: contentBlocks });
+        } else {
+          result = await rpc.call("chat.send", { ...baseParams, message: fullText || "Please describe this image." });
+        }
+      } else {
+        result = await rpc.call("chat.send", { ...baseParams, message: fullText });
+      }
+
+      if (result && typeof result === "object") {
+        const r = result as Record<string, unknown>;
+        const rawContent = r.text || (r.message as Record<string, unknown>)?.content || (r.message as Record<string, unknown>)?.text || "";
+        const replyText = textOf(rawContent);
+        if (replyText) {
+          setMessages((prev) => [...prev, {
+            id: `a-${Date.now()}`,
+            role: "assistant",
+            content: replyText,
+            timestamp: new Date(),
+          }]);
+          finishSending();
+        }
+      }
+    } catch (e) {
+      const errMsg = typeof e === "string" ? e : (e as { message?: string })?.message || "Send failed";
+      setMessages((prev) => [...prev, {
+        id: `err-${Date.now()}`,
+        role: "system",
+        content: `Error: ${errMsg}`,
+        timestamp: new Date(),
+      }]);
+      finishSending();
+    }
+  }
+
+  /** Replace setSending(false) — checks queue and auto-sends merged messages. */
+  function finishSending() {
+    setSending(false);
+    if (messageQueue.current.length > 0) {
+      const merged = mergeQueuedMessages(messageQueue.current);
+      messageQueue.current = [];
+      requestAnimationFrame(() => sendDirect(merged));
+    }
+  }
+
   async function handleSend() {
     const text = input.trim();
     const images = [...imageAttachments];
     const files = [...fileAttachments];
     if (!text && images.length === 0 && files.length === 0) return;
-    if (sending) return;
+
+    // If currently sending, enqueue the message instead of blocking
+    if (sending) {
+      const queued: QueuedMessage = {
+        id: `q-${Date.now()}`,
+        text,
+        images,
+        files,
+      };
+      messageQueue.current = [...messageQueue.current, queued];
+
+      // Show queued message in UI as a normal user message
+      const filePart = files.length > 0 ? `[${files.length} file(s)]` : "";
+      const imgPart = images.length > 0 ? `[${images.length} image(s)]` : "";
+      const attachParts = [imgPart, filePart].filter(Boolean).join(" ");
+      const displayContent = attachParts
+        ? (text ? `${attachParts} ${text}` : attachParts)
+        : text;
+
+      setMessages((prev) => [...prev, {
+        id: queued.id,
+        role: "user",
+        content: displayContent,
+        timestamp: new Date(),
+      }]);
+      setInput("");
+      setImageAttachments([]);
+      setFileAttachments([]);
+      return;
+    }
 
     // Append file paths to the message text so the agent knows where to find them
     const fileSuffix = files.length > 0
@@ -1578,7 +1727,7 @@ function ChatView({ rootDir, serviceState, lastError, startProgress, hidden, gat
             content: replyText,
             timestamp: new Date(),
           }]);
-          setSending(false);
+          finishSending();
         }
       }
     } catch (e) {
@@ -1589,12 +1738,13 @@ function ChatView({ rootDir, serviceState, lastError, startProgress, hidden, gat
         content: `Error: ${errMsg}`,
         timestamp: new Date(),
       }]);
-      setSending(false);
+      finishSending();
     }
   }
 
   function handleAbort() {
     rpc.call("chat.abort", { sessionKey: sessionKey.current }).catch(() => {});
+    messageQueue.current = [];
     setSending(false);
     streamBuf.current = "";
     streamSource.current = null;
@@ -2096,6 +2246,32 @@ function ChatView({ rootDir, serviceState, lastError, startProgress, hidden, gat
       {/* Input */}
       <div className="shrink-0 border-t border-border-subtle px-4 py-4">
         <div className="mx-auto flex max-w-2xl flex-col gap-2">
+          {/* Status bar: shown while sending */}
+          {sending && (
+            <div className="flex items-center gap-2 rounded-lg bg-bg-elevated px-3 py-2 ring-1 ring-border-subtle">
+              <span className="flex items-center gap-1">
+                <span className="inline-block h-1.5 w-1.5 animate-bounce rounded-full bg-accent-emerald [animation-delay:-0.3s]" />
+                <span className="inline-block h-1.5 w-1.5 animate-bounce rounded-full bg-accent-emerald [animation-delay:-0.15s]" />
+                <span className="inline-block h-1.5 w-1.5 animate-bounce rounded-full bg-accent-emerald" />
+              </span>
+              <span className="text-[12px] text-text-secondary">Responding...</span>
+              <span className="flex-1" />
+              {messageQueue.current.length > 0 && (
+                <span className="rounded-md bg-bg-surface px-1.5 py-0.5 text-[11px] font-medium text-text-tertiary ring-1 ring-border-subtle">
+                  {messageQueue.current.length} queued
+                </span>
+              )}
+              <button
+                onClick={handleAbort}
+                className="flex items-center gap-1 rounded-lg bg-accent-red/15 px-2.5 py-1 text-[11px] font-medium text-accent-red ring-1 ring-accent-red/25 transition-all hover:bg-accent-red/25"
+                title="Stop generation and clear queue"
+              >
+                <IconXCircle size={12} />
+                <span>Stop</span>
+              </button>
+            </div>
+          )}
+
           {/* Image preview strip */}
           {imageAttachments.length > 0 && (
             <div className="flex flex-wrap gap-2">
@@ -2160,7 +2336,7 @@ function ChatView({ rootDir, serviceState, lastError, startProgress, hidden, gat
               onCompositionEnd={handleCompositionEnd}
               placeholder={isSecurityOfficer ? "Security Officer — direct chat disabled" : "Message... (@ to mention, ⌘+Enter to send)"}
               rows={4}
-              disabled={sending || isSecurityOfficer}
+              disabled={isSecurityOfficer}
               className="flex-1 resize-none bg-transparent px-3.5 py-3 text-[13px] leading-relaxed text-text-primary placeholder:text-text-ghost focus:outline-none disabled:opacity-50"
             />
           </div>
@@ -2212,7 +2388,7 @@ function ChatView({ rootDir, serviceState, lastError, startProgress, hidden, gat
               />
               <button
                 onClick={() => imageInputRef.current?.click()}
-                disabled={sending || isSecurityOfficer}
+                disabled={isSecurityOfficer}
                 className="flex h-8 w-8 items-center justify-center rounded-lg text-text-tertiary transition-colors hover:bg-bg-hover hover:text-text-secondary disabled:opacity-30"
                 title="Insert image"
               >
@@ -2220,7 +2396,7 @@ function ChatView({ rootDir, serviceState, lastError, startProgress, hidden, gat
               </button>
               <button
                 onClick={handleFilePick}
-                disabled={sending || !rootDir || isSecurityOfficer}
+                disabled={!rootDir || isSecurityOfficer}
                 className="flex h-8 w-8 items-center justify-center rounded-lg text-text-tertiary transition-colors hover:bg-bg-hover hover:text-text-secondary disabled:opacity-30"
                 title="Attach file"
               >
@@ -2228,7 +2404,7 @@ function ChatView({ rootDir, serviceState, lastError, startProgress, hidden, gat
               </button>
               <button
                 onClick={handleVoiceInput}
-                disabled={sending || isSecurityOfficer}
+                disabled={isSecurityOfficer}
                 className={`flex h-8 w-8 items-center justify-center rounded-lg transition-colors disabled:opacity-30 ${
                   voiceListening
                     ? "bg-accent-red/15 text-accent-red ring-1 ring-accent-red/25 animate-pulse"
@@ -2242,12 +2418,13 @@ function ChatView({ rootDir, serviceState, lastError, startProgress, hidden, gat
 
             {sending ? (
               <button
-                onClick={handleAbort}
-                className="flex h-9 items-center gap-1.5 rounded-xl bg-accent-red/15 px-4 text-[12px] font-medium text-accent-red ring-1 ring-accent-red/25 transition-all hover:bg-accent-red/25"
-                title="Abort generation"
+                onClick={handleSend}
+                disabled={isSecurityOfficer || (!input.trim() && imageAttachments.length === 0 && fileAttachments.length === 0)}
+                className="flex h-9 items-center gap-1.5 rounded-xl bg-accent-emerald/15 px-4 text-[12px] font-medium text-accent-emerald ring-1 ring-accent-emerald/25 transition-all hover:bg-accent-emerald/25 disabled:opacity-30 disabled:hover:bg-accent-emerald/15"
+                title="Queue message (will send when current response completes)"
               >
-                <IconXCircle size={14} />
-                <span>Stop</span>
+                <IconSend size={14} />
+                <span>Queue</span>
               </button>
             ) : (
               <button
