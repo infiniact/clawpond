@@ -38,13 +38,13 @@ export type StoredGateway = {
   configured: boolean;
 };
 
-/** DB-side stored gateway shape (snake_case fields from Rust) */
+/** DB-side stored gateway shape (matches Rust serde rename) */
 type DbStoredGateway = {
   id: string;
   name: string;
   emoji: string;
-  gw_type: string;
-  root_dir: string | null;
+  type: string;
+  rootDir: string | null;
   configured: boolean;
 };
 
@@ -84,8 +84,8 @@ export async function loadGatewaysWithMigration(): Promise<{ gateways: Gateway[]
     if (Array.isArray(dbGateways) && dbGateways.length > 0) {
       let migrated = false;
       const gateways = dbGateways.map((g) => {
-        const rootDir = g.root_dir;
-        const gwType = g.gw_type as GatewayType;
+        const rootDir = g.rootDir;
+        const gwType = g.type as GatewayType;
         const newRootDir = g.id === "default" ? "~/.openclaw" : migrateRootDir(rootDir);
         if (newRootDir !== rootDir && rootDir && newRootDir) {
           migrated = true;
@@ -119,7 +119,7 @@ export async function loadGatewaysWithMigration(): Promise<{ gateways: Gateway[]
 
 export async function saveGateways(gateways: Gateway[]) {
   const stored = gateways.map(({ id, name, emoji, type, rootDir, configured }) => ({
-    id, name, emoji, gw_type: type, root_dir: rootDir, configured,
+    id, name, emoji, type, rootDir, configured,
   }));
   await invoke("db_save_gateways", { gateways: stored });
 }

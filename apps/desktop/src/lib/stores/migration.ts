@@ -39,7 +39,7 @@ export async function migrateIfNeeded(): Promise<void> {
     }
 
     // 2. Collect gateways
-    let gateways: Array<{ id: string; name: string; emoji: string; gw_type: string; root_dir: string | null; configured: boolean }> | undefined;
+    let gateways: Array<{ id: string; name: string; emoji: string; type: string; rootDir: string | null; configured: boolean }> | undefined;
     const gwRaw = localStorage.getItem("clawpond-gateways");
     if (gwRaw) {
       try {
@@ -48,8 +48,8 @@ export async function migrateIfNeeded(): Promise<void> {
           id: g.id,
           name: g.name,
           emoji: g.emoji,
-          gw_type: g.type || "docker",
-          root_dir: g.rootDir,
+          type: g.type || "docker",
+          rootDir: g.rootDir,
           configured: g.configured,
         }));
       } catch { /* ignore */ }
