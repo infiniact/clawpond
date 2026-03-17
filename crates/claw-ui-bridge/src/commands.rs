@@ -472,68 +472,6 @@ pub fn update_env_value(root_dir: String, key: String, value: String) -> Result<
 }
 
 #[tauri::command]
-pub async fn migrate_gateway_compose(root_dir: String) -> Result<bool, String> {
-    let expanded = shellexpand::tilde(&root_dir).to_string();
-    tauri::async_runtime::spawn_blocking(move || {
-        clawking::migrate_compose_to_shared_browser(std::path::Path::new(&expanded))
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-#[tauri::command]
-pub async fn browser_start(relay_port: String, image: String, app: AppHandle) -> Result<(), String> {
-    let browser_dir = shellexpand::tilde("~/clawpond/browser").to_string();
-    tauri::async_runtime::spawn_blocking(move || {
-        let dir = std::path::Path::new(&browser_dir);
-        clawking::write_browser_compose(dir, &relay_port, &image)?;
-        let _ = app.emit("browser-progress", "Starting shared browser...");
-        clawking::browser_up(dir)
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-#[tauri::command]
-pub async fn browser_stop() -> Result<(), String> {
-    let browser_dir = shellexpand::tilde("~/clawpond/browser").to_string();
-    tauri::async_runtime::spawn_blocking(move || {
-        clawking::browser_down(std::path::Path::new(&browser_dir))
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-#[tauri::command]
-pub async fn browser_health() -> bool {
-    let browser_dir = shellexpand::tilde("~/clawpond/browser").to_string();
-    tauri::async_runtime::spawn_blocking(move || {
-        clawking::browser_status(std::path::Path::new(&browser_dir))
-    })
-    .await
-    .unwrap_or(false)
-}
-
-#[tauri::command]
-pub async fn resolve_playwright_image() -> String {
-    tauri::async_runtime::spawn_blocking(clawking::resolve_playwright_image)
-        .await
-        .unwrap_or_else(|_| "mcr.microsoft.com/playwright:v1.52.0-noble".to_string())
-}
-
-#[tauri::command]
-pub async fn check_image_update(image: String) -> clawking::ImageUpdateInfo {
-    tauri::async_runtime::spawn_blocking(move || clawking::check_image_update(&image))
-        .await
-        .unwrap_or_else(|_| clawking::ImageUpdateInfo {
-            installed: false,
-            local_digest: None,
-            remote_digest: None,
-            needs_update: false,
-        })
-}
-
-#[tauri::command]
 pub async fn compose_start(root_dir: String, app: AppHandle) -> Result<(), String> {
     let expanded = shellexpand::tilde(&root_dir).to_string();
     tauri::async_runtime::spawn_blocking(move || {

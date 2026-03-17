@@ -37,11 +37,9 @@ function shortDigest(digest: string | undefined): string {
 export function UpdateChecker({ onClose }: { onClose: () => void }) {
   const [images, setImages] = useState<ImageEntry[]>([
     GATEWAY_IMAGE,
-    { key: "browser", image: "mcr.microsoft.com/playwright:v1.52.0-noble", label: "Playwright Browser" },
   ]);
   const [states, setStates] = useState<Record<string, ImageState>>({
     gateway: { status: "checking", percent: 0, layersDone: 0, layersTotal: 0, bytesDownloaded: 0, bytesTotal: 0, updateState: "unknown" },
-    browser: { status: "checking", percent: 0, layersDone: 0, layersTotal: 0, bytesDownloaded: 0, bytesTotal: 0, updateState: "unknown" },
   });
   const [pullingAll, setPullingAll] = useState(false);
 
@@ -49,31 +47,16 @@ export function UpdateChecker({ onClose }: { onClose: () => void }) {
     setStates((prev) => ({ ...prev, [key]: { ...prev[key], ...patch } }));
   }, []);
 
-  // Resolve playwright image and check updates on mount
+  // Check updates on mount
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
         const { invoke } = await import("@tauri-apps/api/core");
 
-        // Resolve latest playwright image
-        let browserImage = "mcr.microsoft.com/playwright:v1.52.0-noble";
-        try {
-          const resolved = await invoke<string>("resolve_playwright_image");
-          if (!cancelled && resolved) {
-            browserImage = resolved;
-            setImages((prev) =>
-              prev.map((img) => (img.key === "browser" ? { ...img, image: resolved } : img))
-            );
-          }
-        } catch {
-          // Keep fallback
-        }
-
-        // Check update status for all images
+        // Check update status for gateway image
         const imageMap: Record<string, string> = {
           gateway: GATEWAY_IMAGE.image,
-          browser: browserImage,
         };
 
         for (const [key, image] of Object.entries(imageMap)) {

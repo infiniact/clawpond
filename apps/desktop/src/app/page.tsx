@@ -27,7 +27,6 @@ import {
   SHARED_DIR_STORAGE_KEY,
   THEME_STORAGE_KEY,
   SECURITY_OFFICER_STORAGE_KEY,
-  PLAYWRIGHT_IMAGE_FALLBACK,
   loadSharedDir,
   loadTheme,
   saveTheme,
@@ -51,8 +50,6 @@ export default function Home() {
   const [updateModal, setUpdateModal] = useState(false);
   const [sharedDir, setSharedDir] = useState(loadSharedDir);
   const [settingsDraft, setSettingsDraft] = useState("");
-  const [browserRunning, setBrowserRunning] = useState(false);
-  const [playwrightImage, setPlaywrightImage] = useState(PLAYWRIGHT_IMAGE_FALLBACK);
   const [theme, setTheme] = useState<"dark" | "light">(loadTheme);
   const [securityOfficerId, setSecurityOfficerId] = useState<string | null>(loadSecurityOfficer);
 
@@ -188,13 +185,6 @@ export default function Home() {
           if (targetGw.type === "local") {
             await invoke("openclaw_start");
           } else {
-            // Auto-start global shared browser if not running
-            if (!browserRunning) {
-              const gwInfo = await invoke<{ port: string; token: string }>("read_gateway_info", { rootDir: rootDir! });
-              const relayPort = String(parseInt(gwInfo.port, 10) + 3);
-              await invoke("browser_start", { relayPort, image: playwrightImageRef.current }).catch(() => {});
-              setBrowserRunning(true);
-            }
             const { listen } = await import("@tauri-apps/api/event");
             unlisten = await listen<ComposeStartProgress>("compose-start-progress", (event) => {
               updateGateway(targetId, { startProgress: event.payload });
@@ -240,34 +230,6 @@ export default function Home() {
           );
         }
       } catch { /* no existing config */ }
-
-      if (cancelled) return;
-
-      // Migrate existing gateway compose files from legacy per-gateway browser to shared-network format.
-      // This will `compose down` + rewrite compose for any gateway still using the old `openclaw-browser` service.
-      try {
-        const currentGateways = gatewaysRef.current;
-        for (const gw of currentGateways) {
-          if (cancelled) break;
-          if (gw.configured && gw.rootDir) {
-            await invoke<boolean>("migrate_gateway_compose", { rootDir: gw.rootDir }).catch(() => {});
-          }
-        }
-      } catch { /* ignore */ }
-
-      if (cancelled) return;
-
-      // Check global shared browser status
-      try {
-        const running = await invoke<boolean>("browser_health");
-        if (!cancelled) setBrowserRunning(running);
-      } catch { /* ignore */ }
-
-      // Resolve latest Playwright image
-      try {
-        const resolved = await invoke<string>("resolve_playwright_image");
-        if (!cancelled && resolved) setPlaywrightImage(resolved);
-      } catch { /* ignore */ }
 
       if (cancelled) return;
 
@@ -365,8 +327,6 @@ export default function Home() {
   activeGatewayRef.current = activeGateway;
   const activeGatewayIdRef = useRef(activeGatewayId);
   activeGatewayIdRef.current = activeGatewayId;
-  const playwrightImageRef = useRef(playwrightImage);
-  playwrightImageRef.current = playwrightImage;
 
   // Poll service health for active gateway — guarded and non-reactive
   const checkHealth = useCallback(async () => {
@@ -380,9 +340,6 @@ export default function Home() {
     try {
       const { invoke } = await import("@tauri-apps/api/core");
       await checkGatewayHealth(invoke, activeGatewayIdRef.current, rootDir);
-      // Also check global browser health
-      const running = await invoke<boolean>("browser_health");
-      setBrowserRunning(running);
     } catch {
       updateGateway(activeGatewayIdRef.current, { serviceState: "error", cpuPercent: undefined, memUsageMb: undefined });
     } finally {
@@ -434,14 +391,6 @@ export default function Home() {
               if (gwType === "local") {
                 await invoke("openclaw_start");
               } else {
-                // Auto-start global shared browser if not running
-                const running = await invoke<boolean>("browser_health");
-                if (!running) {
-                  const gwInfo = await invoke<{ port: string; token: string }>("read_gateway_info", { rootDir: rootDir! });
-                  const relayPort = String(parseInt(gwInfo.port, 10) + 3);
-                  await invoke("browser_start", { relayPort, image: playwrightImageRef.current }).catch(() => {});
-                  setBrowserRunning(true);
-                }
                 unlistenProgress = await listen<ComposeStartProgress>("compose-start-progress", (ev) => {
                   updateGateway(activeGatewayId, { startProgress: ev.payload });
                 });
@@ -654,7 +603,7 @@ export default function Home() {
         <SettingsModal
           settingsDraft={settingsDraft}
           onSettingsDraftChange={setSettingsDraft}
-          browserRunning={browserRunning}
+          browserRunning={false}
           onSave={() => {
             setSharedDir(settingsDraft);
             localStorage.setItem(SHARED_DIR_STORAGE_KEY, settingsDraft);

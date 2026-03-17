@@ -40,8 +40,6 @@ const STEPS = [
   { id: "onboard", icon: IconSettings, title: "Finish", desc: "Review and start services" },
 ] as const;
 
-import { PLAYWRIGHT_IMAGE_FALLBACK } from "../../lib/stores/settings-store";
-
 export type Provider = {
   id: string;
   label: string;
@@ -203,8 +201,6 @@ export function ConfigWizard({ onComplete, onClose, fixedRootDir, gatewayType = 
   const configDir = `${config.rootDir}/config`;
   const workspaceDir = `${config.rootDir}/workspace`;
   const [imageExists, setImageExists] = useState<boolean | null>(null);
-  const [playwrightImageExists, setPlaywrightImageExists] = useState<boolean | null>(null);
-  const [playwrightImage, setPlaywrightImage] = useState(PLAYWRIGHT_IMAGE_FALLBACK);
   const [loading, setLoading] = useState(false);
   const [pullError, setPullError] = useState<string | null>(null);
   const [pullProgress, setPullProgress] = useState<{
@@ -352,22 +348,7 @@ export function ConfigWizard({ onComplete, onClose, fixedRootDir, gatewayType = 
     })();
   }, [fixedRootDir]);
 
-  // Resolve latest Playwright image on mount
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const { invoke } = await import("@tauri-apps/api/core");
-        const image = await invoke<string>("resolve_playwright_image");
-        if (!cancelled && image) setPlaywrightImage(image);
-      } catch {
-        // Keep fallback
-      }
-    })();
-    return () => { cancelled = true; };
-  }, []);
-
-  // Check if Docker images already exist locally
+  // Check if Docker image already exists locally
   useEffect(() => {
     if (!config.image) {
       setImageExists(null);
@@ -377,23 +358,18 @@ export function ConfigWizard({ onComplete, onClose, fixedRootDir, gatewayType = 
     const timer = setTimeout(async () => {
       try {
         const { invoke } = await import("@tauri-apps/api/core");
-        const [openclawExists, pwExists] = await Promise.all([
-          invoke<boolean>("docker_image_exists", { image: config.image }),
-          invoke<boolean>("docker_image_exists", { image: playwrightImage }),
-        ]);
+        const exists = await invoke<boolean>("docker_image_exists", { image: config.image });
         if (!cancelled) {
-          setImageExists(openclawExists);
-          setPlaywrightImageExists(pwExists);
+          setImageExists(exists);
         }
       } catch {
         if (!cancelled) {
           setImageExists(null);
-          setPlaywrightImageExists(null);
         }
       }
     }, 300);
     return () => { cancelled = true; clearTimeout(timer); };
-  }, [config.image, playwrightImage]);
+  }, [config.image]);
 
   async function checkDocker() {
     setDockerStatus({ checking: true, docker: null, dockerVersion: null, compose: null, composeVersion: null });
@@ -448,7 +424,7 @@ export function ConfigWizard({ onComplete, onClose, fixedRootDir, gatewayType = 
   const canProceed = (() => {
     switch (step.id) {
       case "docker":
-        return !!dockerStatus.docker && !!dockerStatus.compose && !!imageExists && !!playwrightImageExists;
+        return !!dockerStatus.docker && !!dockerStatus.compose && !!imageExists;
       case "install":
         return !!openclawStatus.node && (!!openclawStatus.openclaw || !!openclawStatus.npx);
       case "directories":
@@ -775,12 +751,6 @@ export function ConfigWizard({ onComplete, onClose, fixedRootDir, gatewayType = 
       const { invoke } = await import("@tauri-apps/api/core");
       const { listen } = await import("@tauri-apps/api/event");
 
-      // Determine which images need pulling
-      const needOpenClaw = !imageExists;
-      const needPlaywright = !playwrightImageExists;
-      const totalImages = (needOpenClaw ? 1 : 0) + (needPlaywright ? 1 : 0);
-      let pulledCount = 0;
-
       unlisten = await listen<{
         percent: number;
         status: string;
@@ -790,39 +760,21 @@ export function ConfigWizard({ onComplete, onClose, fixedRootDir, gatewayType = 
         bytes_downloaded: number;
         bytes_total: number;
       }>("docker-pull-progress", (event) => {
-        // Scale progress: each image gets an equal share of 0-100
-        const imagePercent = event.payload.percent;
-        const overallPercent = totalImages > 0
-          ? Math.round((pulledCount * 100 + imagePercent) / totalImages)
-          : imagePercent;
-        setPullProgress((prev) => ({
-          percent: overallPercent,
+        setPullProgress({
+          percent: event.payload.percent,
           status: event.payload.status,
           layers_done: event.payload.layers_done,
           layers_total: event.payload.layers_total,
           bytes_downloaded: event.payload.bytes_downloaded,
           bytes_total: event.payload.bytes_total,
-          currentImage: prev?.currentImage || config.image,
-        }));
+          currentImage: config.image,
+        });
       });
 
-      // Pull OpenClaw image
-      if (needOpenClaw) {
-        setPullProgress((prev) => ({ ...prev!, currentImage: config.image }));
-        await invoke("docker_pull_image", { image: config.image });
-        pulledCount++;
-        setImageExists(true);
-      }
+      await invoke("docker_pull_image", { image: config.image });
+      setImageExists(true);
 
-      // Pull Playwright image
-      if (needPlaywright) {
-        setPullProgress({ percent: totalImages > 1 ? 50 : 0, status: "Starting Playwright pull...", layers_done: 0, layers_total: 0, bytes_downloaded: 0, bytes_total: 0, currentImage: playwrightImage });
-        await invoke("docker_pull_image", { image: playwrightImage });
-        pulledCount++;
-        setPlaywrightImageExists(true);
-      }
-
-      setPullProgress({ percent: 100, status: "All images pulled successfully", layers_done: 0, layers_total: 0, bytes_downloaded: 0, bytes_total: 0, currentImage: "" });
+      setPullProgress({ percent: 100, status: "Image pulled successfully", layers_done: 0, layers_total: 0, bytes_downloaded: 0, bytes_total: 0, currentImage: "" });
     } catch (e) {
       setPullError(typeof e === "string" ? e : "Failed to pull image.");
       setPullProgress(null);
@@ -1069,17 +1021,6 @@ export function ConfigWizard({ onComplete, onClose, fixedRootDir, gatewayType = 
                         <span className="text-[11px] text-text-ghost">Not found</span>
                       )}
                     </div>
-                    <div className="flex items-center justify-between">
-                      <span className="truncate text-[11px] text-text-tertiary">{playwrightImage}</span>
-                      {playwrightImageExists ? (
-                        <span className="flex items-center gap-1 text-[11px] font-medium text-accent-emerald">
-                          <IconCheck size={11} />
-                          Ready
-                        </span>
-                      ) : (
-                        <span className="text-[11px] text-text-ghost">Not found</span>
-                      )}
-                    </div>
                   </div>
                 </div>
 
@@ -1108,11 +1049,11 @@ export function ConfigWizard({ onComplete, onClose, fixedRootDir, gatewayType = 
                       {pullProgress.currentImage ? `${pullProgress.currentImage} — ` : ""}{pullProgress.status}
                     </p>
                   </div>
-                ) : pullProgress?.percent === 100 || (imageExists && playwrightImageExists) ? (
+                ) : pullProgress?.percent === 100 || imageExists ? (
                   <div className="flex items-center gap-2 rounded-lg bg-accent-emerald/10 px-3.5 py-2.5 ring-1 ring-accent-emerald/20">
                     <IconCheck size={14} className="shrink-0 text-accent-emerald" />
                     <span className="text-[12px] font-medium text-accent-emerald">
-                      {pullProgress?.percent === 100 ? "All images pulled successfully" : "All images ready"}
+                      {pullProgress?.percent === 100 ? "Image pulled successfully" : "Image ready"}
                     </span>
                   </div>
                 ) : (
@@ -1122,7 +1063,7 @@ export function ConfigWizard({ onComplete, onClose, fixedRootDir, gatewayType = 
                     className="flex w-full items-center justify-center gap-2 rounded-lg bg-bg-elevated py-2.5 text-[12px] font-medium text-text-primary ring-1 ring-border-default transition-all hover:bg-bg-hover hover:ring-border-strong disabled:opacity-50"
                   >
                     <IconDownload size={14} />
-                    {imageExists && !playwrightImageExists ? "Pull Playwright Image" : !imageExists && playwrightImageExists ? "Pull OpenClaw Image" : "Pull All Images"}
+                    Pull OpenClaw Image
                   </button>
                 )}
 

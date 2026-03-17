@@ -1,7 +1,6 @@
 export const SHARED_DIR_STORAGE_KEY = "clawpond-shared-dir";
 export const THEME_STORAGE_KEY = "clawpond-theme";
 export const SECURITY_OFFICER_STORAGE_KEY = "clawpond-security-officer";
-export const PLAYWRIGHT_IMAGE_FALLBACK = "mcr.microsoft.com/playwright:v1.52.0-noble";
 
 export function loadSharedDir(): string {
   try { return localStorage.getItem(SHARED_DIR_STORAGE_KEY) || ""; } catch { return ""; }
