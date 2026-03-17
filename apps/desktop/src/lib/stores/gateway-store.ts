@@ -9,11 +9,13 @@ export type ComposeStartProgress = {
   layers_total: number;
 };
 
+export type GatewayType = "local" | "docker";
+
 export type Gateway = {
   id: string;
   name: string;
   emoji: string;
-  type: "docker";
+  type: GatewayType;
   rootDir: string | null;
   configured: boolean;
   serviceState: ServiceState;
@@ -29,7 +31,7 @@ export type StoredGateway = {
   id: string;
   name: string;
   emoji: string;
-  type: "docker";
+  type: GatewayType;
   rootDir: string | null;
   configured: boolean;
 };
@@ -57,7 +59,9 @@ export function loadGateways(): Gateway[] {
       if (Array.isArray(stored) && stored.length > 0) {
         return stored.map((g) => ({
           ...g,
-          type: "docker" as const,
+          // Default gateway (ClawKing) is always local; others are docker
+          type: g.id === "default" ? "local" as const : (g.type || "docker" as const),
+          rootDir: g.id === "default" ? "~/.openclaw" : g.rootDir,
           serviceState: !g.configured
             ? "unconfigured" as const
             : "loading" as const,
@@ -66,13 +70,13 @@ export function loadGateways(): Gateway[] {
     }
   } catch { /* ignore */ }
   return [
-    { id: "default", name: "ClawKing", emoji: "\u{1F99E}", type: "docker", rootDir: null, configured: false, serviceState: "unconfigured" },
+    { id: "default", name: "ClawKing", emoji: "\u{1F99E}", type: "local", rootDir: "~/.openclaw", configured: false, serviceState: "unconfigured" },
   ];
 }
 
 export function saveGateways(gateways: Gateway[]) {
-  const stored: StoredGateway[] = gateways.map(({ id, name, emoji, rootDir, configured }) => ({
-    id, name, emoji, type: "docker", rootDir, configured,
+  const stored: StoredGateway[] = gateways.map(({ id, name, emoji, type, rootDir, configured }) => ({
+    id, name, emoji, type, rootDir, configured,
   }));
   localStorage.setItem(GATEWAYS_STORAGE_KEY, JSON.stringify(stored));
 }

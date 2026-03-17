@@ -67,7 +67,7 @@ export function AddGatewayModal({
         {nameError && <p className="mb-2 text-[10px] text-accent-red">{nameError}</p>}
         {trimmed && !nameError && (
           <p className="mb-2 text-[10px] text-text-ghost">
-            ~/clawpond/clawking/pond/{trimmed}
+            ~/.openclaw/workspace/pond/{trimmed}
           </p>
         )}
 

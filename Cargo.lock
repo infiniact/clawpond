@@ -650,6 +650,8 @@ dependencies = [
 name = "clawking"
 version = "0.1.0"
 dependencies = [
+ "dirs",
+ "libc",
  "log",
  "regex",
  "serde",

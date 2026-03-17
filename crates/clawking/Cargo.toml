@@ -14,3 +14,7 @@ log.workspace = true
 thiserror.workspace = true
 ureq = { version = "3", features = ["json"] }
 regex = "1"
+dirs = "6"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

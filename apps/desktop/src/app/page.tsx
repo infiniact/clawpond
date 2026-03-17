@@ -178,32 +178,40 @@ export default function Home() {
       } catch { /* ignore */ }
       return;
     }
-    if (!rootDir) return;
+    if (!rootDir && targetGw.type !== "local") return;
     try {
       const { invoke } = await import("@tauri-apps/api/core");
       if (action === "start") {
         updateGateway(targetId, { serviceState: "starting", lastError: undefined, startProgress: undefined });
         let unlisten: (() => void) | undefined;
         try {
-          // Auto-start global shared browser if not running
-          if (!browserRunning) {
-            const gwInfo = await invoke<{ port: string; token: string }>("read_gateway_info", { rootDir });
-            const relayPort = String(parseInt(gwInfo.port, 10) + 3);
-            await invoke("browser_start", { relayPort, image: playwrightImageRef.current }).catch(() => {});
-            setBrowserRunning(true);
+          if (targetGw.type === "local") {
+            await invoke("openclaw_start");
+          } else {
+            // Auto-start global shared browser if not running
+            if (!browserRunning) {
+              const gwInfo = await invoke<{ port: string; token: string }>("read_gateway_info", { rootDir: rootDir! });
+              const relayPort = String(parseInt(gwInfo.port, 10) + 3);
+              await invoke("browser_start", { relayPort, image: playwrightImageRef.current }).catch(() => {});
+              setBrowserRunning(true);
+            }
+            const { listen } = await import("@tauri-apps/api/event");
+            unlisten = await listen<ComposeStartProgress>("compose-start-progress", (event) => {
+              updateGateway(targetId, { startProgress: event.payload });
+            });
+            await invoke("compose_start", { rootDir });
           }
-          const { listen } = await import("@tauri-apps/api/event");
-          unlisten = await listen<ComposeStartProgress>("compose-start-progress", (event) => {
-            updateGateway(targetId, { startProgress: event.payload });
-          });
-          await invoke("compose_start", { rootDir });
           updateGateway(targetId, { serviceState: "running", lastError: undefined, startProgress: undefined });
         } finally {
           unlisten?.();
         }
       } else if (action === "stop") {
         updateGateway(targetId, { serviceState: "stopping", lastError: undefined });
-        await invoke("compose_stop", { rootDir });
+        if (targetGw.type === "local") {
+          await invoke("openclaw_stop");
+        } else {
+          await invoke("compose_stop", { rootDir });
+        }
         updateGateway(targetId, { serviceState: "stopped", cpuPercent: undefined, memUsageMb: undefined, lastError: undefined });
       }
     } catch (err) {
@@ -222,10 +230,11 @@ export default function Home() {
       try {
         const detected = await invoke<string | null>("detect_config");
         if (!cancelled && detected) {
+          const detectedType = detected === "~/.openclaw" ? "local" as const : "docker" as const;
           setGateways((prev) =>
             prev.map((g) =>
               g.id === "default" && !g.configured
-                ? { ...g, rootDir: detected, configured: true, serviceState: "loading" }
+                ? { ...g, rootDir: detected, type: detectedType, configured: true, serviceState: "loading" }
                 : g
             )
           );
@@ -287,15 +296,36 @@ export default function Home() {
     rootDir: string,
   ) {
     try {
-      const status = await invoke<{
-        running: boolean;
-        healthy: boolean | null;
-        error: string | null;
-      }>("compose_health", { rootDir });
-      const isRunning = status.running;
-      const serviceState: ServiceState = isRunning
-        ? status.healthy === false ? "error" : "running"
-        : "stopped";
+      const gw = gatewaysRef.current.find((g) => g.id === gwId);
+      const gwType = gw?.type || "docker";
+
+      let isRunning: boolean;
+      let serviceState: ServiceState;
+
+      if (gwType === "local") {
+        // Local process health check
+        const localStatus = await invoke<{
+          running: boolean;
+          healthy: boolean | null;
+          pid: number | null;
+          error: string | null;
+        }>("openclaw_health");
+        isRunning = localStatus.running;
+        serviceState = isRunning
+          ? localStatus.healthy === false ? "error" : "running"
+          : "stopped";
+      } else {
+        // Docker compose health check
+        const status = await invoke<{
+          running: boolean;
+          healthy: boolean | null;
+          error: string | null;
+        }>("compose_health", { rootDir });
+        isRunning = status.running;
+        serviceState = isRunning
+          ? status.healthy === false ? "error" : "running"
+          : "stopped";
+      }
 
       // Don't overwrite transitional or error-with-detail states
       const current = gatewaysRef.current.find((g) => g.id === gwId);
@@ -310,8 +340,8 @@ export default function Home() {
         ? { serviceState }
         : { serviceState, cpuPercent: undefined, memUsageMb: undefined });
 
-      // Fetch stats in background
-      if (isRunning) {
+      // Fetch stats in background (Docker only)
+      if (isRunning && gwType === "docker") {
         invoke<{ cpu_percent: number; mem_usage_mb: number } | null>(
           "compose_stats", { rootDir }
         ).then((stats) => {
@@ -389,7 +419,8 @@ export default function Home() {
   // Listen for tray gateway start/stop actions
   useEffect(() => {
     const rootDir = activeGateway.rootDir;
-    if (!rootDir) return;
+    const gwType = activeGateway.type || "docker";
+    if (!rootDir && gwType !== "local") return;
     let unlisten: (() => void) | undefined;
     (async () => {
       const { listen } = await import("@tauri-apps/api/event");
@@ -400,25 +431,33 @@ export default function Home() {
             updateGateway(activeGatewayId, { serviceState: "starting", lastError: undefined, startProgress: undefined });
             let unlistenProgress: (() => void) | undefined;
             try {
-              // Auto-start global shared browser if not running
-              const running = await invoke<boolean>("browser_health");
-              if (!running) {
-                const gwInfo = await invoke<{ port: string; token: string }>("read_gateway_info", { rootDir });
-                const relayPort = String(parseInt(gwInfo.port, 10) + 3);
-                await invoke("browser_start", { relayPort, image: playwrightImageRef.current }).catch(() => {});
-                setBrowserRunning(true);
+              if (gwType === "local") {
+                await invoke("openclaw_start");
+              } else {
+                // Auto-start global shared browser if not running
+                const running = await invoke<boolean>("browser_health");
+                if (!running) {
+                  const gwInfo = await invoke<{ port: string; token: string }>("read_gateway_info", { rootDir: rootDir! });
+                  const relayPort = String(parseInt(gwInfo.port, 10) + 3);
+                  await invoke("browser_start", { relayPort, image: playwrightImageRef.current }).catch(() => {});
+                  setBrowserRunning(true);
+                }
+                unlistenProgress = await listen<ComposeStartProgress>("compose-start-progress", (ev) => {
+                  updateGateway(activeGatewayId, { startProgress: ev.payload });
+                });
+                await invoke("compose_start", { rootDir });
               }
-              unlistenProgress = await listen<ComposeStartProgress>("compose-start-progress", (ev) => {
-                updateGateway(activeGatewayId, { startProgress: ev.payload });
-              });
-              await invoke("compose_start", { rootDir });
               updateGateway(activeGatewayId, { serviceState: "running", lastError: undefined, startProgress: undefined });
             } finally {
               unlistenProgress?.();
             }
           } else if (event.payload === "stop") {
             updateGateway(activeGatewayId, { serviceState: "stopping", lastError: undefined });
-            await invoke("compose_stop", { rootDir });
+            if (gwType === "local") {
+              await invoke("openclaw_stop");
+            } else {
+              await invoke("compose_stop", { rootDir });
+            }
             updateGateway(activeGatewayId, { serviceState: "stopped", lastError: undefined });
           }
         } catch (err) {
@@ -428,11 +467,11 @@ export default function Home() {
       });
     })();
     return () => { unlisten?.(); };
-  }, [activeGateway.rootDir, activeGatewayId, updateGateway, checkHealth]);
+  }, [activeGateway.rootDir, activeGateway.type, activeGatewayId, updateGateway, checkHealth]);
 
   function handleAddGateway(name: string, emoji: string) {
     const id = `gw-${Date.now()}`;
-    const dir = `~/clawpond/clawking/pond/${name}`;
+    const dir = `~/.openclaw/workspace/pond/${name}`;
     setGateways((prev) => [...prev, { id, name, emoji, type: "docker", rootDir: dir, configured: false, serviceState: "unconfigured" }]);
     setActiveGatewayId(id);
     setAddGatewayModal(false);
@@ -443,10 +482,14 @@ export default function Home() {
     if (!gw) return;
 
     // Stop the service first if running
-    if (gw.rootDir && gw.serviceState === "running") {
+    if (gw.serviceState === "running") {
       try {
         const { invoke } = await import("@tauri-apps/api/core");
-        await invoke("compose_stop", { rootDir: gw.rootDir });
+        if (gw.type === "local") {
+          await invoke("openclaw_stop");
+        } else if (gw.rootDir) {
+          await invoke("compose_stop", { rootDir: gw.rootDir });
+        }
       } catch { /* ignore */ }
     }
 
@@ -511,7 +554,6 @@ export default function Home() {
         />
         {gateways.map((g) => {
           const isActive = g.id === activeGatewayId;
-          const isDefault = g.id === "default";
           return (
             <ChatArea
               key={g.id}
@@ -530,8 +572,8 @@ export default function Home() {
               serviceState={g.serviceState}
               lastError={g.lastError}
               startProgress={g.startProgress}
-              skipDocker={!isDefault}
-              fixedRootDir={!isDefault && g.rootDir ? g.rootDir : undefined}
+              fixedRootDir={g.type !== "local" && g.rootDir ? g.rootDir : undefined}
+              gatewayType={g.type || "docker"}
               sharedDir={sharedDir}
               onBusyChange={(busy: boolean) => updateGateway(g.id, { busy })}
               securityOfficerId={securityOfficerId ?? undefined}

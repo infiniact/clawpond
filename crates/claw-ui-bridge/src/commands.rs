@@ -90,6 +90,140 @@ pub fn apply_update(component: String, state: State<AppState>) -> Result<(), Str
     updater.apply(&component).map_err(|e| e.to_string())
 }
 
+// -- Local OpenClaw process commands --
+
+#[tauri::command]
+pub async fn check_openclaw() -> clawking::OpenClawEnvStatus {
+    tauri::async_runtime::spawn_blocking(clawking::check_openclaw_env)
+        .await
+        .unwrap_or_else(|_| clawking::OpenClawEnvStatus {
+            node_installed: false,
+            node_version: None,
+            openclaw_installed: false,
+            openclaw_version: None,
+            npx_available: false,
+        })
+}
+
+#[tauri::command]
+pub async fn openclaw_start(_app: AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let home = clawking::openclaw_home();
+        let env_path = home.join(".env");
+        let mut port = "18789".to_string();
+        let mut token = String::new();
+        let mut bind = "lan".to_string();
+
+        if env_path.exists() {
+            if let Ok(content) = std::fs::read_to_string(&env_path) {
+                for line in content.lines() {
+                    let line = line.trim();
+                    if let Some(val) = line.strip_prefix("OPENCLAW_GATEWAY_PORT=") {
+                        port = val.to_string();
+                    } else if let Some(val) = line.strip_prefix("OPENCLAW_GATEWAY_TOKEN=") {
+                        token = val.to_string();
+                    } else if let Some(val) = line.strip_prefix("OPENCLAW_GATEWAY_BIND=") {
+                        bind = val.to_string();
+                    }
+                }
+            }
+        }
+
+        let config = clawking::LocalOpenClawConfig { port, bind, token };
+        clawking::openclaw_start(&config)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn openclaw_stop() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let home = clawking::openclaw_home();
+        clawking::openclaw_stop(&home)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn openclaw_health() -> clawking::LocalServiceStatus {
+    let home = clawking::openclaw_home();
+    let env_path = home.join(".env");
+    let mut port = "18789".to_string();
+
+    if env_path.exists() {
+        if let Ok(content) = std::fs::read_to_string(&env_path) {
+            for line in content.lines() {
+                if let Some(val) = line.trim().strip_prefix("OPENCLAW_GATEWAY_PORT=") {
+                    port = val.to_string();
+                }
+            }
+        }
+    }
+
+    tauri::async_runtime::spawn_blocking(move || {
+        clawking::openclaw_status(&home, &port)
+    })
+    .await
+    .unwrap_or_else(|_| clawking::LocalServiceStatus {
+        running: false,
+        healthy: None,
+        pid: None,
+        error: Some("Health check task failed".into()),
+    })
+}
+
+#[tauri::command]
+pub fn write_local_config(
+    config_json: serde_json::Value,
+    gateway_port: String,
+    gateway_bind: String,
+    gateway_token: String,
+    provider_env_key: String,
+    provider_api_key: String,
+) -> Result<(), String> {
+    let home = clawking::openclaw_home();
+    let workspace_dir = home.join("workspace");
+
+    // Write openclaw.json to ~/.openclaw/openclaw.json
+    let config_str = serde_json::to_string_pretty(&config_json)
+        .map_err(|e| format!("Failed to serialize config: {}", e))?;
+    clawking::write_local_config(&home, &config_str)?;
+
+    // Write .env with directory references for compatibility with existing commands
+    let mut env_vars = std::collections::HashMap::new();
+    env_vars.insert("OPENCLAW_WORKSPACE_DIR".to_string(), workspace_dir.to_string_lossy().to_string());
+    env_vars.insert("OPENCLAW_GATEWAY_PORT".to_string(), gateway_port);
+    env_vars.insert("OPENCLAW_GATEWAY_BIND".to_string(), gateway_bind);
+    env_vars.insert("OPENCLAW_GATEWAY_TOKEN".to_string(), gateway_token);
+    if !provider_env_key.is_empty() && !provider_api_key.is_empty() {
+        env_vars.insert(provider_env_key, provider_api_key);
+    }
+    clawking::write_local_env(&home, &env_vars)?;
+
+    // Create standard subdirectories
+    std::fs::create_dir_all(home.join("workspace/memory"))
+        .map_err(|e| format!("Failed to create workspace dirs: {}", e))?;
+    std::fs::create_dir_all(home.join("workspace/tmp"))
+        .map_err(|e| format!("Failed to create workspace dirs: {}", e))?;
+    std::fs::create_dir_all(home.join("workspace/pond"))
+        .map_err(|e| format!("Failed to create pond dir: {}", e))?;
+    std::fs::create_dir_all(home.join("logs"))
+        .map_err(|e| format!("Failed to create logs dir: {}", e))?;
+
+    Ok(())
+}
+
+#[tauri::command]
+pub fn write_local_auth_profiles(
+    provider: String,
+    api_key: String,
+) -> Result<(), String> {
+    let home = clawking::openclaw_home();
+    clawking::write_local_auth_profiles(&home, &provider, &api_key)
+}
+
 // -- Docker environment commands --
 
 /// Check if a TCP port is available (not in use).
@@ -186,6 +320,15 @@ pub fn write_auth_profiles(
 /// Returns the root_dir if found, None otherwise.
 #[tauri::command]
 pub fn detect_config() -> Option<String> {
+    // Check new standard location first
+    if let Some(home) = dirs::home_dir() {
+        let openclaw_home = home.join(".openclaw");
+        if openclaw_home.join("openclaw.json").exists() {
+            return Some("~/.openclaw".to_string());
+        }
+    }
+
+    // Legacy locations
     let candidates = if cfg!(target_os = "windows") {
         vec![
             dirs::home_dir().map(|h| h.join("clawpond\\clawking").to_string_lossy().to_string()),

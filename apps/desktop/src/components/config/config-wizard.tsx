@@ -30,6 +30,7 @@ import {
 
 const STEPS = [
   { id: "docker", icon: IconDownload, title: "Docker Environment", desc: "Check Docker and pull the OpenClaw image" },
+  { id: "install", icon: IconSearch, title: "Install Check", desc: "Check Node.js and OpenClaw installation" },
   { id: "directories", icon: IconFolder, title: "Directories", desc: "Configure data and workspace directories" },
   { id: "gateway", icon: IconGlobe, title: "Gateway", desc: "Configure the OpenClaw gateway service" },
   { id: "model", icon: IconCpu, title: "Chat Model", desc: "Select AI model provider and verify connectivity" },
@@ -145,17 +146,22 @@ function formatBytes(bytes: number): string {
   return `${(bytes / 1_000_000_000).toFixed(2)} GB`;
 }
 
-export function ConfigWizard({ onComplete, onClose, skipDocker, fixedRootDir, sharedDir }: { onComplete: (rootDir: string) => void; onClose?: () => void; skipDocker?: boolean; fixedRootDir?: string; sharedDir?: string }) {
+export function ConfigWizard({ onComplete, onClose, fixedRootDir, gatewayType = "docker", sharedDir }: { onComplete: (rootDir: string) => void; onClose?: () => void; fixedRootDir?: string; gatewayType?: "local" | "docker"; sharedDir?: string }) {
+  const isLocal = gatewayType === "local";
   const activeSteps = STEPS.filter((s) => {
-    if (skipDocker && s.id === "docker") return false;
+    // Local type: show "install" instead of "docker", skip "directories"
+    if (isLocal && s.id === "docker") return false;
+    if (!isLocal && s.id === "install") return false;
+    if (isLocal && s.id === "directories") return false;
+    // Docker (pond) type: fixedRootDir means directories step is pre-set
     if (fixedRootDir && s.id === "directories") return false;
     return true;
   });
   const [currentStep, setCurrentStep] = useState(0);
   const [completed, setCompleted] = useState<Set<number>>(new Set());
 
-  // For pond gateways (fixedRootDir set), auto-assign unique ports to avoid conflicts with ClawKing (18789)
-  const isPond = !!fixedRootDir && fixedRootDir !== "~/clawpond/clawking";
+  // For pond gateways (docker workers), auto-assign unique ports to avoid conflicts with ClawKing (18789)
+  const isPond = !isLocal && !!fixedRootDir;
   const [config, setConfig] = useState(() => {
     let gatewayPort = "18789";
     if (isPond) {
@@ -172,7 +178,7 @@ export function ConfigWizard({ onComplete, onClose, skipDocker, fixedRootDir, sh
       // Docker
       image: "ghcr.io/openclaw/openclaw:latest",
       // Directories
-      rootDir: fixedRootDir || "~/clawpond/clawking",
+      rootDir: fixedRootDir || (isLocal ? "~/.openclaw" : "~/.openclaw/workspace/pond/default"),
       // Gateway
       gatewayPort,
       gatewayBind: "lan",
@@ -217,6 +223,14 @@ export function ConfigWizard({ onComplete, onClose, skipDocker, fixedRootDir, sh
     compose: boolean | null;
     composeVersion: string | null;
   }>({ checking: true, docker: null, dockerVersion: null, compose: null, composeVersion: null });
+  const [openclawStatus, setOpenclawStatus] = useState<{
+    checking: boolean;
+    node: boolean | null;
+    nodeVersion: string | null;
+    openclaw: boolean | null;
+    openclawVersion: string | null;
+    npx: boolean | null;
+  }>({ checking: true, node: null, nodeVersion: null, openclaw: null, openclawVersion: null, npx: null });
   const [modelList, setModelList] = useState<string[]>([]);
   const [modelFetching, setModelFetching] = useState(false);
   const [modelVerified, setModelVerified] = useState<boolean | null>(null);
@@ -252,7 +266,11 @@ export function ConfigWizard({ onComplete, onClose, skipDocker, fixedRootDir, sh
   }, [config.gatewayPort]);
 
   useEffect(() => {
-    checkDocker();
+    if (isLocal) {
+      checkOpenClawEnv();
+    } else {
+      checkDocker();
+    }
   }, []);
 
   // Pre-fill form from existing config if a gateway was previously configured
@@ -399,6 +417,30 @@ export function ConfigWizard({ onComplete, onClose, skipDocker, fixedRootDir, sh
     }
   }
 
+  async function checkOpenClawEnv() {
+    setOpenclawStatus({ checking: true, node: null, nodeVersion: null, openclaw: null, openclawVersion: null, npx: null });
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const result = await invoke<{
+        node_installed: boolean;
+        node_version: string | null;
+        openclaw_installed: boolean;
+        openclaw_version: string | null;
+        npx_available: boolean;
+      }>("check_openclaw");
+      setOpenclawStatus({
+        checking: false,
+        node: result.node_installed,
+        nodeVersion: result.node_version,
+        openclaw: result.openclaw_installed,
+        openclawVersion: result.openclaw_version,
+        npx: result.npx_available,
+      });
+    } catch {
+      setOpenclawStatus({ checking: false, node: null, nodeVersion: null, openclaw: null, openclawVersion: null, npx: null });
+    }
+  }
+
   const step = activeSteps[currentStep];
   const isLast = currentStep === activeSteps.length - 1;
 
@@ -407,6 +449,8 @@ export function ConfigWizard({ onComplete, onClose, skipDocker, fixedRootDir, sh
     switch (step.id) {
       case "docker":
         return !!dockerStatus.docker && !!dockerStatus.compose && !!imageExists && !!playwrightImageExists;
+      case "install":
+        return !!openclawStatus.node && (!!openclawStatus.openclaw || !!openclawStatus.npx);
       case "directories":
         return config.rootDir.trim().length > 0;
       case "gateway": {
@@ -446,21 +490,25 @@ export function ConfigWizard({ onComplete, onClose, skipDocker, fixedRootDir, sh
         // Auto-generate gateway token if empty
         const gatewayToken = config.gatewayToken || crypto.randomUUID().replace(/-/g, "") + crypto.randomUUID().replace(/-/g, "");
 
-        // 1. Write .env + docker-compose.yml (Docker infra + API key)
-        await invoke("write_compose_config", {
-          rootDir: config.rootDir,
-          image: config.image,
-          configDir: configDir,
-          workspaceDir: workspaceDir,
-          gatewayPort: config.gatewayPort,
-          gatewayBind: config.gatewayBind,
-          gatewayToken,
-          providerEnvKey: provider?.envKey || "",
-          providerApiKey: config.apiKey,
-          sharedDir: sharedDir || "",
-        });
+        // 1. Write infra config (Docker compose or local .env)
+        if (!isLocal) {
+          // Docker mode: write .env + docker-compose.yml
+          await invoke("write_compose_config", {
+            rootDir: config.rootDir,
+            image: config.image,
+            configDir: configDir,
+            workspaceDir: workspaceDir,
+            gatewayPort: config.gatewayPort,
+            gatewayBind: config.gatewayBind,
+            gatewayToken,
+            providerEnvKey: provider?.envKey || "",
+            providerApiKey: config.apiKey,
+            sharedDir: sharedDir || "",
+          });
+        }
 
         // 2. Build openclaw.json following the official OpenClaw schema
+        const workspacePath = isLocal ? "~/.openclaw/workspace" : "/home/node/.openclaw/workspace";
         const openclawConfig: Record<string, unknown> = {
           browser: {
             enabled: true,
@@ -469,7 +517,7 @@ export function ConfigWizard({ onComplete, onClose, skipDocker, fixedRootDir, sh
           agents: {
             defaults: {
               model: config.modelName,
-              workspace: "/home/node/.openclaw/workspace",
+              workspace: workspacePath,
               compaction: {
                 mode: "safeguard",
               },
@@ -636,17 +684,37 @@ export function ConfigWizard({ onComplete, onClose, skipDocker, fixedRootDir, sh
           openclawConfig.plugins = { entries: pluginEntries };
         }
 
-        await invoke("write_openclaw_config", {
-          configDir: configDir,
-          configJson: openclawConfig,
-        });
+        if (isLocal) {
+          // Local mode: write config via write_local_config
+          await invoke("write_local_config", {
+            configJson: openclawConfig,
+            gatewayPort: config.gatewayPort,
+            gatewayBind: config.gatewayBind,
+            gatewayToken,
+            providerEnvKey: provider?.envKey || "",
+            providerApiKey: config.apiKey,
+          });
+        } else {
+          // Docker mode: write openclaw.json to config dir
+          await invoke("write_openclaw_config", {
+            configDir: configDir,
+            configJson: openclawConfig,
+          });
+        }
 
         // 3. Write auth-profiles.json for agent API key resolution
-        await invoke("write_auth_profiles", {
-          configDir: configDir,
-          provider: providerPrefix,
-          apiKey: config.apiKey,
-        });
+        if (isLocal) {
+          await invoke("write_local_auth_profiles", {
+            provider: providerPrefix,
+            apiKey: config.apiKey,
+          });
+        } else {
+          await invoke("write_auth_profiles", {
+            configDir: configDir,
+            provider: providerPrefix,
+            apiKey: config.apiKey,
+          });
+        }
 
         // 3b. Write image model API key to auth-profiles if using a different provider
         if (config.imageModelName && config.imageModelProvider) {
@@ -658,20 +726,33 @@ export function ConfigWizard({ onComplete, onClose, skipDocker, fixedRootDir, sh
               if (config.imageApiKey && imageProvider?.envKey) {
                 await invoke("update_env_value", { rootDir: config.rootDir, key: imageProvider.envKey, value: config.imageApiKey });
               }
-              await invoke("write_auth_profiles", {
-                configDir: configDir,
-                provider: imageProviderPrefix,
-                apiKey: effectiveImageKey,
-              });
+              if (isLocal) {
+                await invoke("write_local_auth_profiles", {
+                  provider: imageProviderPrefix,
+                  apiKey: effectiveImageKey,
+                });
+              } else {
+                await invoke("write_auth_profiles", {
+                  configDir: configDir,
+                  provider: imageProviderPrefix,
+                  apiKey: effectiveImageKey,
+                });
+              }
             }
           }
         }
 
         // 4. Start services
-        await invoke("compose_start", { rootDir: config.rootDir });
-        onComplete(config.rootDir);
+        if (isLocal) {
+          await invoke("openclaw_start");
+          onComplete("~/.openclaw");
+        } else {
+          await invoke("compose_start", { rootDir: config.rootDir });
+          onComplete(config.rootDir);
+        }
       } catch (e) {
-        setStartError(typeof e === "string" ? e : "Failed to start service.");
+        const msg = typeof e === "string" ? e : (e instanceof Error ? e.message : JSON.stringify(e));
+        setStartError(msg || "Failed to start service.");
       } finally {
         setStarting(false);
       }
@@ -1049,6 +1130,63 @@ export function ConfigWizard({ onComplete, onClose, skipDocker, fixedRootDir, sh
               </>
             )}
 
+            {/* ── Install Check (local mode) ── */}
+            {step.id === "install" && (
+              <>
+                <div className="space-y-2 rounded-lg bg-bg-surface px-3.5 py-3 ring-1 ring-border-default">
+                  <p className="text-[11px] font-medium text-text-secondary">Environment Check</p>
+                  <div className="space-y-1.5">
+                    <EnvRow label="node" checking={openclawStatus.checking} ok={openclawStatus.node} version={openclawStatus.nodeVersion} />
+                    <EnvRow label="openclaw" checking={openclawStatus.checking} ok={openclawStatus.openclaw} version={openclawStatus.openclawVersion} />
+                    <EnvRow label="npx" checking={openclawStatus.checking} ok={openclawStatus.npx} version={null} />
+                  </div>
+                  {!openclawStatus.checking && !openclawStatus.node && (
+                    <p className="mt-2 text-[11px] leading-relaxed text-accent-red">
+                      Node.js is required. Install it from <a href="https://nodejs.org" target="_blank" rel="noreferrer" className="underline">nodejs.org</a> or via your package manager.
+                    </p>
+                  )}
+                  {!openclawStatus.checking && openclawStatus.node && !openclawStatus.openclaw && !openclawStatus.npx && (
+                    <p className="mt-2 text-[11px] leading-relaxed text-accent-red">
+                      OpenClaw is not installed. Install it with: <code className="rounded bg-bg-elevated px-1.5 py-0.5 font-mono text-[10px]">npm install -g openclaw</code>
+                    </p>
+                  )}
+                  {!openclawStatus.checking && openclawStatus.node && !openclawStatus.openclaw && openclawStatus.npx && (
+                    <p className="mt-2 text-[11px] leading-relaxed text-text-tertiary">
+                      OpenClaw not found globally, but npx is available. Will use <code className="rounded bg-bg-elevated px-1.5 py-0.5 font-mono text-[10px]">npx openclaw</code> to start.
+                    </p>
+                  )}
+                  {!openclawStatus.checking && openclawStatus.node && openclawStatus.openclaw && (
+                    <div className="mt-2 flex items-center gap-2 rounded-lg bg-accent-emerald/10 px-3 py-2 ring-1 ring-accent-emerald/20">
+                      <IconCheck size={14} className="shrink-0 text-accent-emerald" />
+                      <span className="text-[12px] font-medium text-accent-emerald">Ready to go</span>
+                    </div>
+                  )}
+                  {!openclawStatus.checking && (
+                    <button onClick={checkOpenClawEnv} className="mt-1 text-[11px] font-medium text-accent-emerald hover:underline">
+                      Re-check
+                    </button>
+                  )}
+                </div>
+
+                <div className="rounded-lg bg-bg-surface px-3.5 py-3 ring-1 ring-border-default">
+                  <p className="text-[11px] font-medium text-text-secondary">Directory</p>
+                  <pre className="mt-2 font-mono text-[10px] leading-relaxed text-text-tertiary">
+{`~/.openclaw/
+├── openclaw.json          ← Main config
+├── .env                   ← API keys & settings
+├── agents/main/agent/     ← Auth profiles
+├── workspace/             ← Working files
+│   ├── memory/
+│   ├── tmp/
+│   └── pond/              ← Worker instances
+└── logs/
+    ├── openclaw.log
+    └── openclaw.pid`}
+                  </pre>
+                </div>
+              </>
+            )}
+
             {/* ── Step 2: Directories ── */}
             {step.id === "directories" && (
               <>
@@ -1056,7 +1194,7 @@ export function ConfigWizard({ onComplete, onClose, skipDocker, fixedRootDir, sh
                   label="Root Directory"
                   value={config.rootDir}
                   onChange={(v) => setConfig((c) => ({ ...c, rootDir: v }))}
-                  placeholder="~/clawpond/clawking"
+                  placeholder="~/.openclaw/workspace/pond/<name>"
                   hint="All ClawKing data will be stored under this directory"
                 />
                 <div className="rounded-lg bg-bg-surface px-3.5 py-3 ring-1 ring-border-default">
@@ -1114,16 +1252,18 @@ export function ConfigWizard({ onComplete, onClose, skipDocker, fixedRootDir, sh
                   hint="Used to authenticate with the Control UI"
                 />
                 <div className="rounded-lg bg-bg-surface px-3.5 py-3 ring-1 ring-border-default">
-                  <p className="text-[11px] font-medium text-text-secondary">Docker Compose Services</p>
+                  <p className="text-[11px] font-medium text-text-secondary">{isLocal ? "Local Process" : "Docker Compose Services"}</p>
                   <div className="mt-2 space-y-1.5">
                     <div className="flex items-center justify-between text-[11px]">
-                      <span className="text-text-tertiary">openclaw-gateway</span>
+                      <span className="text-text-tertiary">{isLocal ? "openclaw gateway" : "openclaw-gateway"}</span>
                       <code className="font-mono text-[10px] text-text-secondary">:{config.gatewayPort}</code>
                     </div>
-                    <div className="flex items-center justify-between text-[11px]">
-                      <span className="text-text-tertiary">openclaw-cli</span>
-                      <span className="text-[10px] text-text-ghost">network: gateway</span>
-                    </div>
+                    {!isLocal && (
+                      <div className="flex items-center justify-between text-[11px]">
+                        <span className="text-text-tertiary">openclaw-cli</span>
+                        <span className="text-[10px] text-text-ghost">network: gateway</span>
+                      </div>
+                    )}
                   </div>
                   <p className="mt-2 text-[10px] text-text-ghost">
                     Control UI: http://localhost:{config.gatewayPort}/?token=...
@@ -1497,12 +1637,18 @@ export function ConfigWizard({ onComplete, onClose, skipDocker, fixedRootDir, sh
                   <p className="text-[11px] font-medium text-text-secondary">Configuration Summary</p>
                   <div className="mt-2 space-y-1.5 text-[11px]">
                     <div className="flex items-center gap-2">
-                      <span className="text-text-ghost">Image</span>
-                      <code className="font-mono text-[10px] text-text-secondary">{config.image}</code>
+                      <span className="text-text-ghost">Type</span>
+                      <code className="font-mono text-[10px] text-text-secondary">{isLocal ? "Local Process" : "Docker Container"}</code>
                     </div>
+                    {!isLocal && (
+                      <div className="flex items-center gap-2">
+                        <span className="text-text-ghost">Image</span>
+                        <code className="font-mono text-[10px] text-text-secondary">{config.image}</code>
+                      </div>
+                    )}
                     <div className="flex items-center gap-2">
                       <span className="text-text-ghost">Root</span>
-                      <code className="font-mono text-[10px] text-text-secondary">{config.rootDir}</code>
+                      <code className="font-mono text-[10px] text-text-secondary">{isLocal ? "~/.openclaw" : config.rootDir}</code>
                     </div>
                     <div className="flex items-center gap-2">
                       <span className="text-text-ghost">Gateway</span>
@@ -1541,14 +1687,16 @@ export function ConfigWizard({ onComplete, onClose, skipDocker, fixedRootDir, sh
                   <div className="space-y-1.5 text-[11px]">
                     <div className="flex items-center gap-2">
                       <code className="shrink-0 rounded bg-bg-elevated px-1 py-px font-mono text-[10px] text-text-tertiary">.env</code>
-                      <span className="text-text-ghost">Docker 环境变量、API Key</span>
+                      <span className="text-text-ghost">{isLocal ? "环境变量、API Key" : "Docker 环境变量、API Key"}</span>
                     </div>
+                    {!isLocal && (
+                      <div className="flex items-center gap-2">
+                        <code className="shrink-0 rounded bg-bg-elevated px-1 py-px font-mono text-[10px] text-text-tertiary">docker-compose.yml</code>
+                        <span className="text-text-ghost">容器编排配置</span>
+                      </div>
+                    )}
                     <div className="flex items-center gap-2">
-                      <code className="shrink-0 rounded bg-bg-elevated px-1 py-px font-mono text-[10px] text-text-tertiary">docker-compose.yml</code>
-                      <span className="text-text-ghost">容器编排配置</span>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <code className="shrink-0 rounded bg-bg-elevated px-1 py-px font-mono text-[10px] text-text-tertiary">config/openclaw.json</code>
+                      <code className="shrink-0 rounded bg-bg-elevated px-1 py-px font-mono text-[10px] text-text-tertiary">{isLocal ? "openclaw.json" : "config/openclaw.json"}</code>
                       <span className="text-text-ghost">模型、频道、技能配置</span>
                     </div>
                   </div>
@@ -1561,7 +1709,7 @@ export function ConfigWizard({ onComplete, onClose, skipDocker, fixedRootDir, sh
                   </p>
                   <div className="mt-2">
                     <CmdBlock
-                      cmd="docker compose run --rm openclaw-cli onboard"
+                      cmd={isLocal ? "openclaw onboard" : "docker compose run --rm openclaw-cli onboard"}
                       label="Advanced onboarding (sandbox, extra mounts, etc.)"
                     />
                   </div>

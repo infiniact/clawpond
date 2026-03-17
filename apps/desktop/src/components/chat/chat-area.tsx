@@ -110,8 +110,8 @@ export function ChatArea({
   rootDir,
   serviceState,
   lastError,
-  skipDocker,
   fixedRootDir,
+  gatewayType,
   sharedDir,
   onBusyChange,
   startProgress,
@@ -133,8 +133,8 @@ export function ChatArea({
   rootDir: string | null;
   serviceState: string;
   lastError?: string;
-  skipDocker?: boolean;
   fixedRootDir?: string;
+  gatewayType?: "local" | "docker";
   sharedDir?: string;
   onBusyChange?: (busy: boolean) => void;
   startProgress?: ComposeStartProgress;
@@ -366,14 +366,14 @@ export function ChatArea({
         <ConfigWizard
           onComplete={onConfigComplete}
           onClose={reconfiguring ? onCloseReconfig : undefined}
-          skipDocker={skipDocker}
           fixedRootDir={fixedRootDir}
+          gatewayType={gatewayType}
           sharedDir={sharedDir}
         />
       </div>
       {configured && (
         <SplitPane showChat={showChat}>
-          <ChatView rootDir={rootDir} serviceState={serviceState} lastError={lastError} startProgress={startProgress} hidden={hidden} gatewayId={gatewayId} gatewayName={gatewayName} gatewayEmoji={gatewayEmoji} onBusyChange={onBusyChange} securityOfficerId={securityOfficerId} agents={agents} agentIcons={agentIcons} onRunningAgentsChange={setRunningAgents} onDiscoveredAgentsChange={setDiscoveredAgents} />
+          <ChatView rootDir={rootDir} serviceState={serviceState} lastError={lastError} startProgress={startProgress} hidden={hidden} gatewayId={gatewayId} gatewayName={gatewayName} gatewayEmoji={gatewayEmoji} gatewayType={gatewayType} onBusyChange={onBusyChange} securityOfficerId={securityOfficerId} agents={agents} agentIcons={agentIcons} onRunningAgentsChange={setRunningAgents} onDiscoveredAgentsChange={setDiscoveredAgents} />
         </SplitPane>
       )}
     </div>
@@ -461,7 +461,7 @@ function fromStored(msg: StoredMessage): Message {
   };
 }
 
-function ChatView({ rootDir, serviceState, lastError, startProgress, hidden, gatewayId, gatewayName, gatewayEmoji, onBusyChange, securityOfficerId, agents, agentIcons, onRunningAgentsChange, onDiscoveredAgentsChange }: { rootDir: string | null; serviceState: string; lastError?: string; startProgress?: ComposeStartProgress; hidden?: boolean; gatewayId: string; gatewayName: string; gatewayEmoji: string; onBusyChange?: (busy: boolean) => void; securityOfficerId?: string; agents?: string[]; agentIcons?: Record<string, string>; onRunningAgentsChange?: (agents: Set<string>) => void; onDiscoveredAgentsChange?: (agents: Set<string>) => void }) {
+function ChatView({ rootDir, serviceState, lastError, startProgress, hidden, gatewayId, gatewayName, gatewayEmoji, gatewayType, onBusyChange, securityOfficerId, agents, agentIcons, onRunningAgentsChange, onDiscoveredAgentsChange }: { rootDir: string | null; serviceState: string; lastError?: string; startProgress?: ComposeStartProgress; hidden?: boolean; gatewayId: string; gatewayName: string; gatewayEmoji: string; gatewayType?: "local" | "docker"; onBusyChange?: (busy: boolean) => void; securityOfficerId?: string; agents?: string[]; agentIcons?: Record<string, string>; onRunningAgentsChange?: (agents: Set<string>) => void; onDiscoveredAgentsChange?: (agents: Set<string>) => void }) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [connected, setConnected] = useState(false);
@@ -1856,14 +1856,14 @@ function ChatView({ rootDir, serviceState, lastError, startProgress, hidden, gat
                   <p className="truncate text-[10px] text-text-ghost">{startProgress.message}</p>
                 </div>
               ) : (
-                <p className="text-[11px] text-text-ghost">Running docker compose up</p>
+                <p className="text-[11px] text-text-ghost">{gatewayType === "local" ? "Starting local process..." : "Running docker compose up"}</p>
               )}
             </>
           ) : serviceState === "stopping" ? (
             <>
               <IconSpinner size={24} className="animate-spin text-amber-400" />
               <p className="text-[13px] text-text-secondary">Stopping Gateway...</p>
-              <p className="text-[11px] text-text-ghost">Running docker compose down</p>
+              <p className="text-[11px] text-text-ghost">{gatewayType === "local" ? "Stopping local process..." : "Running docker compose down"}</p>
             </>
           ) : serviceState === "error" ? (
             <>
