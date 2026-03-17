@@ -485,15 +485,54 @@ export function ConfigWizard({ onComplete, onClose, fixedRootDir, gatewayType = 
 
         // 2. Build openclaw.json following the official OpenClaw schema
         const workspacePath = isLocal ? "~/.openclaw/workspace" : "/home/node/.openclaw/workspace";
+
+        // Gateway config differs between local and docker
+        const gatewayConfig: Record<string, unknown> = isLocal
+          ? {
+              mode: "local",
+              auth: {
+                mode: "token",
+                token: gatewayToken,
+              },
+              controlUi: {
+                dangerouslyDisableDeviceAuth: true,
+                allowInsecureAuth: true,
+                dangerouslyAllowHostHeaderOriginFallback: true,
+                allowedOrigins: [
+                  `http://localhost:${config.gatewayPort}`,
+                  `http://127.0.0.1:${config.gatewayPort}`,
+                  "tauri://localhost",
+                  "https://tauri.localhost",
+                ],
+              },
+            }
+          : {
+              mode: "local",
+              auth: {
+                mode: "token",
+                token: gatewayToken,
+              },
+              controlUi: {
+                dangerouslyDisableDeviceAuth: true,
+                allowInsecureAuth: true,
+                dangerouslyAllowHostHeaderOriginFallback: true,
+                allowedOrigins: [
+                  "*",
+                ],
+              },
+            };
+
         const openclawConfig: Record<string, unknown> = {
-          browser: {
-            enabled: true,
-            relayBindHost: "0.0.0.0",
-          },
           agents: {
             defaults: {
-              model: config.modelName,
+              model: {
+                primary: config.modelName,
+                fallbacks: [],
+              },
               workspace: workspacePath,
+              models: {
+                [config.modelName]: {},
+              },
               compaction: {
                 mode: "safeguard",
               },
@@ -517,21 +556,7 @@ export function ConfigWizard({ onComplete, onClose, fixedRootDir, gatewayType = 
             restart: true,
             ownerDisplay: "raw",
           },
-          gateway: {
-            mode: "local",
-            auth: {
-              mode: "token",
-              token: gatewayToken,
-            },
-            controlUi: {
-              dangerouslyDisableDeviceAuth: true,
-              allowInsecureAuth: true,
-              dangerouslyAllowHostHeaderOriginFallback: true,
-              allowedOrigins: [
-                "*",
-              ],
-            },
-          },
+          gateway: gatewayConfig,
         };
 
         // Add custom provider definition if the provider needs a custom baseUrl
@@ -565,9 +590,13 @@ export function ConfigWizard({ onComplete, onClose, fixedRootDir, gatewayType = 
 
         // Add imageModel to agents.defaults if configured
         if (config.imageModelName) {
-          (openclawConfig.agents as Record<string, unknown> as { defaults: Record<string, unknown> }).defaults.imageModel = {
+          const defaults = (openclawConfig.agents as Record<string, unknown>).defaults as Record<string, unknown>;
+          defaults.imageModel = {
             primary: config.imageModelName,
           };
+          // Also register the image model in agents.defaults.models
+          if (!defaults.models) defaults.models = {};
+          (defaults.models as Record<string, unknown>)[config.imageModelName] = {};
 
           // Add image model custom provider if needed and different from chat model provider
           const imageProviderPrefix = config.imageModelProvider.split("-")[0];
