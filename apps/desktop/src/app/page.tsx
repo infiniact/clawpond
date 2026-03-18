@@ -314,6 +314,30 @@ export default function Home() {
       } catch { /* ignore */ }
       return;
     }
+    if (action === "update-docker") {
+      if (!rootDir || targetGw.type === "local") return;
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        // Stop gateway first
+        if (targetGw.serviceState === "running") {
+          updateGateway(targetId, { serviceState: "stopping" });
+          await invoke("compose_stop", { rootDir });
+        }
+        // Update docker-compose.yml
+        const modified = await invoke<boolean>("add_docker_extra_hosts", { rootDir });
+        if (modified) {
+          console.log(`[update-docker] Updated ${rootDir}`);
+        }
+        // Restart gateway
+        updateGateway(targetId, { serviceState: "starting" });
+        await invoke("compose_start", { rootDir });
+        updateGateway(targetId, { serviceState: "running" });
+      } catch (err) {
+        updateGateway(targetId, { serviceState: "error", lastError: String(err) });
+      }
+      checkHealth();
+      return;
+    }
     if (!rootDir && targetGw.type !== "local") return;
     try {
       const { invoke } = await import("@tauri-apps/api/core");

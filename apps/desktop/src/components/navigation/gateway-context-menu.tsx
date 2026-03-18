@@ -1,7 +1,7 @@
 "use client";
 
 import { useRef, useEffect } from "react";
-import { IconPlay, IconStop, IconGlobe, IconCpu, IconHash, IconShield, IconSettings, IconXCircle, IconX, IconEdit } from "../icons";
+import { IconPlay, IconStop, IconGlobe, IconCpu, IconHash, IconShield, IconSettings, IconXCircle, IconX, IconEdit, IconRefresh } from "../icons";
 import type { Gateway } from "../../lib/stores/gateway-store";
 
 export function GatewayContextMenu({
@@ -126,6 +126,16 @@ export function GatewayContextMenu({
         <IconSettings size={14} className="shrink-0 text-text-tertiary" />
         Reconfigure...
       </button>
+      {ctxGw.type !== "local" && (
+        <button
+          onClick={() => onAction("update-docker")}
+          disabled={!ctxGw.configured}
+          className="flex w-full items-center gap-2.5 px-3 py-2 text-left text-[12px] text-text-primary transition-colors hover:bg-bg-hover disabled:opacity-40"
+        >
+          <IconRefresh size={14} className="shrink-0 text-text-tertiary" />
+          Update Docker Config
+        </button>
+      )}
       {ctxGw.id !== "default" && (
         <>
           <div className="my-1 h-px bg-border-subtle" />

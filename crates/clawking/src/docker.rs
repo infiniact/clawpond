@@ -461,6 +461,8 @@ pub fn write_compose_files(root_dir: &Path, cfg: &ComposeConfig) -> Result<(), S
   openclaw-gateway:
     image: ${{OPENCLAW_IMAGE:-ghcr.io/openclaw/openclaw:latest}}
 {network_section}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       HOME: /home/node
       TERM: xterm-256color
@@ -492,6 +494,8 @@ pub fn write_compose_files(root_dir: &Path, cfg: &ComposeConfig) -> Result<(), S
   openclaw-cli:
     image: ${{OPENCLAW_IMAGE:-ghcr.io/openclaw/openclaw:latest}}
 {cli_network}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     cap_drop:
       - NET_RAW
       - NET_ADMIN

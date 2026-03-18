@@ -1241,6 +1241,74 @@ pub fn rename_gateway_dir(old_root_dir: String, new_name: String) -> Result<Stri
     Ok(new_root_dir)
 }
 
+/// Add extra_hosts to docker-compose.yml if not already present.
+/// Returns true if the file was modified.
+#[tauri::command]
+pub fn add_docker_extra_hosts(root_dir: String) -> Result<bool, String> {
+    let expanded = shellexpand::tilde(&root_dir).to_string();
+    let compose_path = std::path::Path::new(&expanded).join("docker-compose.yml");
+
+    if !compose_path.exists() {
+        return Ok(false);
+    }
+
+    let content = std::fs::read_to_string(&compose_path)
+        .map_err(|e| format!("Failed to read docker-compose.yml: {}", e))?;
+    let original_content = content.clone();
+
+    // Check if extra_hosts already exists
+    if content.contains("extra_hosts:") {
+        return Ok(false);
+    }
+
+    // Add extra_hosts after each network_mode or ports section
+    // We need to add it to both openclaw-gateway and openclaw-cli services
+    let updated = content
+        .replace(
+            "    network_mode: host\n    environment:",
+            "    network_mode: host\n    extra_hosts:\n      - \"host.docker.internal:host-gateway\"\n    environment:",
+        )
+        .replace(
+            "        - \"127.0.0.1:${OPENCLAW_RELAY_PORT",
+            "        - \"127.0.0.1:${OPENCLAW_RELAY_PORT",
+        );
+
+    // For port-based config, find the end of ports section and add extra_hosts
+    let updated = if updated == content {
+        // Try adding after ports section (macOS/Windows style)
+        let ports_end = content.find("- \"127.0.0.1:${OPENCLAW_RELAY_PORT");
+        if let Some(pos) = ports_end {
+            // Find the end of this line
+            if let Some(line_end) = content[pos..].find('\n') {
+                let insert_pos = pos + line_end + 1;
+                let mut new_content = content.clone();
+                new_content.insert_str(insert_pos, "    extra_hosts:\n      - \"host.docker.internal:host-gateway\"\n");
+                new_content
+            } else {
+                content
+            }
+        } else {
+            content
+        }
+    } else {
+        updated
+    };
+
+    // Also add to openclaw-cli if present
+    let final_content = updated.replace(
+        "    network_mode: \"service:openclaw-gateway\"\n    cap_drop:",
+        "    network_mode: \"service:openclaw-gateway\"\n    extra_hosts:\n      - \"host.docker.internal:host-gateway\"\n    cap_drop:",
+    );
+
+    if final_content != original_content {
+        std::fs::write(&compose_path, &final_content)
+            .map_err(|e| format!("Failed to write docker-compose.yml: {}", e))?;
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
 #[derive(Serialize)]
 pub struct MergeFilesResult {
     pub copied: u32,
