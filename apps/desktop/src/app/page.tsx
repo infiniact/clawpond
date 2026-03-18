@@ -9,6 +9,7 @@ import { QuickModelConfig, QuickChannelsConfig } from "../components/config/quic
 import { UpdateChecker } from "../components/modals/update-checker";
 import { AddGatewayModal } from "../components/modals/add-gateway-modal";
 import { DeleteGatewayModal } from "../components/modals/delete-gateway-modal";
+import { RenameGatewayModal } from "../components/modals/rename-gateway-modal";
 import { SettingsModal } from "../components/modals/settings-modal";
 import { GatewayContextMenu } from "../components/navigation/gateway-context-menu";
 import { DiscoveryBanner, type DiscoveredItem, type ConflictAction, type DiscoveredGateway } from "../components/discovery-banner";
@@ -52,6 +53,7 @@ export default function Home() {
   const [reconfiguring, setReconfiguring] = useState(false);
   const [quickConfig, setQuickConfig] = useState<"model" | "channels" | null>(null);
   const [deleteConfirm, setDeleteConfirm] = useState<{ gatewayId: string; name: string; rootDir: string | null } | null>(null);
+  const [renameGateway, setRenameGateway] = useState<{ gatewayId: string; name: string; rootDir: string } | null>(null);
   const [settingsModal, setSettingsModal] = useState(false);
   const [updateModal, setUpdateModal] = useState(false);
   const [sharedDir, setSharedDir] = useState("");
@@ -88,7 +90,20 @@ export default function Home() {
         }
       } catch { /* no existing config */ }
 
-      setGateways(loaded);
+      // Deduplicate gateways by rootDir (keep first occurrence)
+      const seenRootDirs = new Set<string>();
+      const deduped = loaded.filter((g) => {
+        const key = (g.rootDir || "").replace(/\/+$/, "").toLowerCase();
+        if (seenRootDirs.has(key)) return false;
+        seenRootDirs.add(key);
+        return true;
+      });
+      if (deduped.length !== loaded.length) {
+        console.log(`[hydrate] Deduped gateways: ${loaded.length} → ${deduped.length}`);
+        saveGateways(deduped);
+      }
+
+      setGateways(deduped);
       setSharedDir(await loadSharedDir());
       setTheme(await loadTheme());
       setSecurityOfficerId(await loadSecurityOfficer());
@@ -104,6 +119,10 @@ export default function Home() {
         const byRootDir = new Map(loaded.map((g) => [norm(g.rootDir), g]));
         const byName = new Map(loaded.map((g) => [g.name.toLowerCase(), g]));
 
+        // Debug logging
+        console.log("[scan] DB gateways:", loaded.map(g => `${g.name}@${g.rootDir}`));
+        console.log("[scan] Disk found:", discovered.map(d => `${d.name}@${d.rootDir}`));
+
         const items: DiscoveredItem[] = [];
         for (const d of discovered) {
           const dNorm = norm(d.rootDir);
@@ -114,9 +133,11 @@ export default function Home() {
             // rootDir already imported
             if (existingByPath.name.toLowerCase() === d.name.toLowerCase()) {
               // Fully matched — skip (duplicate)
+              console.log(`[scan] SKIP duplicate: ${d.name} @ ${d.rootDir}`);
               continue;
             }
             // Same path but name differs on disk vs DB
+            console.log(`[scan] PATH_EXISTS: ${d.name} vs ${existingByPath.name}`);
             items.push({
               ...d,
               conflict: "path_exists",
@@ -127,9 +148,11 @@ export default function Home() {
             // Same name found — check if rootDir also matches (just stored differently)
             if (norm(existingByName.rootDir) === dNorm) {
               // Same gateway, rootDir format differs — skip
+              console.log(`[scan] SKIP same gateway diff format: ${d.name} @ ${d.rootDir} vs ${existingByName.rootDir}`);
               continue;
             }
             // Different rootDir but same name
+            console.log(`[scan] NAME_CLASH: ${d.name} @ ${d.rootDir} vs ${existingByName.rootDir}`);
             items.push({
               ...d,
               conflict: "name_clash",
@@ -138,6 +161,7 @@ export default function Home() {
             });
           } else {
             // Completely new
+            console.log(`[scan] NEW: ${d.name} @ ${d.rootDir}`);
             items.push({ ...d, conflict: "new" });
           }
         }
@@ -260,6 +284,12 @@ export default function Home() {
     }
     if (action === "delete") {
       setDeleteConfirm({ gatewayId: targetId, name: targetGw.name, rootDir: targetGw.rootDir });
+      return;
+    }
+    if (action === "rename") {
+      if (targetGw.rootDir) {
+        setRenameGateway({ gatewayId: targetId, name: targetGw.name, rootDir: targetGw.rootDir });
+      }
       return;
     }
     if (action === "config-model") {
@@ -727,6 +757,67 @@ export default function Home() {
     setDeleteConfirm(null);
   }
 
+  async function handleRenameGateway(newName: string) {
+    if (!renameGateway) return;
+    const { gatewayId, rootDir } = renameGateway;
+    const gw = gateways.find((g) => g.id === gatewayId);
+    if (!gw) return;
+
+    const { invoke } = await import("@tauri-apps/api/core");
+
+    // Stop the gateway first if running
+    if (gw.serviceState === "running") {
+      try {
+        if (gw.type === "local") {
+          await invoke("openclaw_stop");
+        } else {
+          await invoke("compose_stop", { rootDir });
+        }
+      } catch { /* ignore */ }
+    }
+
+    try {
+      // Rename the directory
+      const newRootDir = await invoke<string>("rename_gateway_dir", { oldRootDir: rootDir, newName });
+
+      // Update the gateway in state
+      setGateways((prev) => {
+        const next = prev.map((g) =>
+          g.id === gatewayId
+            ? { ...g, name: newName, rootDir: newRootDir, serviceState: "starting" as const }
+            : g
+        );
+        saveGateways(next);
+        return next;
+      });
+
+      // Start the gateway from new location
+      if (gw.type !== "local") {
+        await invoke("compose_start", { rootDir: newRootDir });
+      } else {
+        await invoke("openclaw_start");
+      }
+
+      updateGateway(gatewayId, { serviceState: "running" });
+    } catch (err) {
+      console.error("[rename] failed:", err);
+      updateGateway(gatewayId, { serviceState: "error", lastError: String(err) });
+    }
+
+    setRenameGateway(null);
+    checkHealth();
+  }
+
+  function handleEmojiChange(gatewayId: string, emoji: string) {
+    setGateways((prev) => {
+      const next = prev.map((g) =>
+        g.id === gatewayId ? { ...g, emoji } : g
+      );
+      saveGateways(next);
+      return next;
+    });
+  }
+
   const sidebarGateways: GatewayItem[] = gateways.map((g) => ({
     id: g.id,
     name: g.name,
@@ -771,6 +862,7 @@ export default function Home() {
           onSelect={setActiveGatewayId}
           onAddGateway={() => setAddGatewayModal(true)}
           onGatewayContextMenu={handleGatewayContextMenu}
+          onEmojiChange={handleEmojiChange}
         />
         {gateways.map((g) => {
           const isActive = g.id === activeGatewayId;
@@ -866,6 +958,16 @@ export default function Home() {
           hasFiles={!!deleteConfirm.rootDir}
           onConfirm={(deleteFiles) => handleDeleteGateway(deleteConfirm.gatewayId, deleteFiles)}
           onCancel={() => setDeleteConfirm(null)}
+        />
+      )}
+
+      {/* Rename Gateway */}
+      {renameGateway && (
+        <RenameGatewayModal
+          name={renameGateway.name}
+          existingNames={gateways.map((g) => g.name.toLowerCase())}
+          onConfirm={handleRenameGateway}
+          onCancel={() => setRenameGateway(null)}
         />
       )}
 

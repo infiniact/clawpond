@@ -1183,6 +1183,64 @@ pub fn delete_gateway_dir(root_dir: String) -> Result<(), String> {
     Ok(())
 }
 
+/// Rename a gateway directory and update paths in .env file.
+/// Returns the new tilde-collapsed rootDir.
+#[tauri::command]
+pub fn rename_gateway_dir(old_root_dir: String, new_name: String) -> Result<String, String> {
+    let expanded = shellexpand::tilde(&old_root_dir).to_string();
+    let old_path = std::path::Path::new(&expanded);
+
+    if !old_path.exists() {
+        return Err(format!("Source directory does not exist: {}", expanded));
+    }
+
+    let home = dirs::home_dir().ok_or("Cannot resolve home directory")?;
+    let pond_dir = home.join(".openclaw/workspace/pond");
+    let new_path = pond_dir.join(&new_name);
+    let new_root_dir = format!("~/.openclaw/workspace/pond/{}", new_name);
+
+    // Only allow renaming within pond directory
+    if !old_path.starts_with(&pond_dir) {
+        // If not in pond, move it there
+        if new_path.exists() {
+            return Err(format!("Target already exists: {}", new_path.display()));
+        }
+        std::fs::create_dir_all(&pond_dir)
+            .map_err(|e| format!("Failed to create pond directory: {}", e))?;
+    } else {
+        // Renaming within pond
+        if new_path.exists() {
+            return Err(format!("Target already exists: {}", new_path.display()));
+        }
+    }
+
+    // Move the directory
+    std::fs::rename(old_path, &new_path)
+        .map_err(|e| format!("Failed to rename directory: {}", e))?;
+
+    // Verify move succeeded
+    if !new_path.exists() {
+        return Err(format!("Rename failed: target does not exist after move"));
+    }
+    if old_path.exists() {
+        return Err(format!("Rename failed: source still exists after move"));
+    }
+
+    // Update .env file with new paths
+    let env_path = new_path.join(".env");
+    if env_path.exists() {
+        let content = std::fs::read_to_string(&env_path)
+            .map_err(|e| format!("Failed to read .env: {}", e))?;
+        let old_expanded = old_path.to_string_lossy();
+        let new_expanded = new_path.to_string_lossy();
+        let updated = content.replace(&*old_expanded, &*new_expanded);
+        std::fs::write(&env_path, updated)
+            .map_err(|e| format!("Failed to write .env: {}", e))?;
+    }
+
+    Ok(new_root_dir)
+}
+
 #[derive(Serialize)]
 pub struct MergeFilesResult {
     pub copied: u32,

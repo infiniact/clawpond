@@ -326,6 +326,7 @@ pub fn run() {
             claw_ui_bridge::scan_gateways,
             claw_ui_bridge::copy_to_pond,
             claw_ui_bridge::delete_gateway_dir,
+            claw_ui_bridge::rename_gateway_dir,
             claw_ui_bridge::db_get_setting,
             claw_ui_bridge::db_set_setting,
             claw_ui_bridge::db_delete_setting,

@@ -1,11 +1,14 @@
 "use client";
 
+import { useState, useRef, useEffect } from "react";
 import {
   IconPlus,
   IconChevronRight,
   IconShield,
+  IconSearch,
 } from "../icons";
 import type { ServiceState } from "../../lib/stores/gateway-store";
+import { EMOJI_OPTIONS, FEATURED_COUNT } from "../../lib/emoji-data";
 
 export type GatewayItem = {
   id: string;
@@ -26,6 +29,7 @@ export function Sidebar({
   onSelect,
   onAddGateway,
   onGatewayContextMenu,
+  onEmojiChange,
 }: {
   expanded: boolean;
   onToggleExpanded: () => void;
@@ -34,7 +38,36 @@ export function Sidebar({
   onSelect: (id: string) => void;
   onAddGateway: () => void;
   onGatewayContextMenu?: (id: string, e: React.MouseEvent) => void;
+  onEmojiChange?: (gatewayId: string, emoji: string) => void;
 }) {
+  const [emojiPicker, setEmojiPicker] = useState<{ gatewayId: string; x: number; y: number } | null>(null);
+  const [emojiSearch, setEmojiSearch] = useState("");
+  const [emojiShowAll, setEmojiShowAll] = useState(false);
+  const emojiRef = useRef<HTMLDivElement>(null);
+
+  // Close emoji picker on click outside
+  useEffect(() => {
+    if (!emojiPicker) return;
+    const handler = (e: MouseEvent) => {
+      if (emojiRef.current && !emojiRef.current.contains(e.target as Node)) {
+        setEmojiPicker(null);
+        setEmojiSearch("");
+        setEmojiShowAll(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [emojiPicker]);
+
+  const filtered = emojiSearch
+    ? EMOJI_OPTIONS.filter((e) =>
+        e.kw.toLowerCase().includes(emojiSearch.toLowerCase()) ||
+        e.emoji.includes(emojiSearch)
+      )
+    : emojiShowAll
+      ? EMOJI_OPTIONS
+      : EMOJI_OPTIONS.slice(0, FEATURED_COUNT);
+
   return (
     <nav
       className={`flex h-full shrink-0 flex-col bg-bg-deep transition-all duration-200 ${
@@ -79,7 +112,15 @@ export function Sidebar({
               )}
 
               <div className="relative shrink-0">
-                <span className={`leading-none ${expanded ? "text-[16px]" : "text-[15px] opacity-80"}`}>
+                <span
+                  className={`leading-none cursor-pointer ${expanded ? "text-[16px]" : "text-[15px] opacity-80"}`}
+                  onDoubleClick={(e) => {
+                    e.stopPropagation();
+                    const rect = (e.target as HTMLElement).getBoundingClientRect();
+                    setEmojiPicker({ gatewayId: item.id, x: rect.left, y: rect.bottom + 4 });
+                  }}
+                  title="Double-click to change icon"
+                >
                   {item.emoji}
                 </span>
                 <span
@@ -137,6 +178,50 @@ export function Sidebar({
           <IconChevronRight size={15} className={`transition-transform ${expanded ? "rotate-180" : ""}`} />
         </SidebarBtn>
       </div>
+
+      {/* Emoji picker popup */}
+      {emojiPicker && (
+        <div
+          ref={emojiRef}
+          className="fixed z-[1000] w-[220px] rounded-xl bg-bg-surface p-3 shadow-xl ring-1 ring-border-default"
+          style={{ left: Math.min(emojiPicker.x, window.innerWidth - 240), top: Math.min(emojiPicker.y, window.innerHeight - 280) }}
+        >
+          <div className="mb-2 flex items-center gap-1.5 rounded-lg bg-bg-elevated px-2 py-1.5 ring-1 ring-border-default">
+            <IconSearch size={12} className="shrink-0 text-text-ghost" />
+            <input
+              type="text"
+              value={emojiSearch}
+              onChange={(e) => setEmojiSearch(e.target.value)}
+              placeholder="Search..."
+              className="w-full bg-transparent text-[11px] text-text-primary placeholder:text-text-ghost focus:outline-none"
+            />
+          </div>
+          <div className="grid max-h-[180px] grid-cols-8 gap-0.5 overflow-y-auto">
+            {filtered.map((e) => (
+              <button
+                key={e.emoji}
+                onClick={() => {
+                  onEmojiChange?.(emojiPicker.gatewayId, e.emoji);
+                  setEmojiPicker(null);
+                  setEmojiSearch("");
+                  setEmojiShowAll(false);
+                }}
+                className="flex h-7 w-7 items-center justify-center rounded-md text-[14px] transition-all hover:bg-bg-hover"
+              >
+                {e.emoji}
+              </button>
+            ))}
+          </div>
+          {!emojiSearch && !emojiShowAll && EMOJI_OPTIONS.length > FEATURED_COUNT && (
+            <button
+              onClick={() => setEmojiShowAll(true)}
+              className="mt-2 w-full text-center text-[11px] font-medium text-accent-emerald hover:underline"
+            >
+              Show more ({EMOJI_OPTIONS.length - FEATURED_COUNT} more)
+            </button>
+          )}
+        </div>
+      )}
     </nav>
   );
 }

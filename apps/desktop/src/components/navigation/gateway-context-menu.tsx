@@ -1,7 +1,7 @@
 "use client";
 
 import { useRef, useEffect } from "react";
-import { IconPlay, IconStop, IconGlobe, IconCpu, IconHash, IconShield, IconSettings, IconXCircle, IconX } from "../icons";
+import { IconPlay, IconStop, IconGlobe, IconCpu, IconHash, IconShield, IconSettings, IconXCircle, IconX, IconEdit } from "../icons";
 import type { Gateway } from "../../lib/stores/gateway-store";
 
 export function GatewayContextMenu({
@@ -129,6 +129,14 @@ export function GatewayContextMenu({
       {ctxGw.id !== "default" && (
         <>
           <div className="my-1 h-px bg-border-subtle" />
+          <button
+            onClick={() => onAction("rename")}
+            disabled={!ctxGw.configured}
+            className="flex w-full items-center gap-2.5 px-3 py-2 text-left text-[12px] text-text-primary transition-colors hover:bg-bg-hover disabled:opacity-40"
+          >
+            <IconEdit size={14} className="shrink-0 text-text-tertiary" />
+            {"Rename..."}
+          </button>
           <button
             onClick={() => onAction("delete")}
             className="flex w-full items-center gap-2.5 px-3 py-2 text-left text-[12px] text-accent-red transition-colors hover:bg-accent-red/10"
