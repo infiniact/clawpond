@@ -1153,6 +1153,27 @@ pub fn merge_workspace_files(from_root_dir: String, to_root_dir: String, append_
     Ok(MergeFilesResult { copied, skipped, appended })
 }
 
+/// Delete a gateway root directory (used after merge to remove the old location).
+#[tauri::command]
+pub fn delete_gateway_dir(root_dir: String) -> Result<(), String> {
+    let expanded = shellexpand::tilde(&root_dir).to_string();
+    let path = std::path::Path::new(&expanded);
+
+    // Safety check: only allow deleting under ~/.openclaw or ~/clawpond
+    let home = dirs::home_dir().ok_or("Cannot resolve home directory")?;
+    let openclaw = home.join(".openclaw");
+    let clawpond = home.join("clawpond");
+    if !path.starts_with(&openclaw) && !path.starts_with(&clawpond) {
+        return Err(format!("Refusing to delete directory outside ~/.openclaw or ~/clawpond: {}", expanded));
+    }
+
+    if path.exists() {
+        std::fs::remove_dir_all(path)
+            .map_err(|e| format!("Failed to delete directory: {}", e))?;
+    }
+    Ok(())
+}
+
 #[derive(Serialize)]
 pub struct MergeFilesResult {
     pub copied: u32,

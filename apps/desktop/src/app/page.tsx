@@ -527,6 +527,18 @@ export default function Home() {
       return;
     }
 
+    // "delete_old": remove old gateway directory before importing new
+    if (action === "delete_old" && d.conflictId) {
+      const oldGw = gateways.find((g) => g.id === d.conflictId);
+      if (oldGw?.rootDir) {
+        try {
+          await invoke("delete_gateway_dir", { rootDir: oldGw.rootDir });
+        } catch (e) {
+          console.warn("[delete_old] failed to delete:", e);
+        }
+      }
+    }
+
     // "merge": migrate old messages + workspace files (append .md) to new rootDir, then overwrite
     if (action === "merge" && d.conflictId) {
       const oldGw = gateways.find((g) => g.id === d.conflictId);
@@ -540,6 +552,8 @@ export default function Home() {
               appendMd: true,
             }),
           ]);
+          // Delete the old gateway directory after successful merge
+          await invoke("delete_gateway_dir", { rootDir: oldGw.rootDir });
         } catch (e) {
           console.warn("[merge] failed to merge:", e);
         }
