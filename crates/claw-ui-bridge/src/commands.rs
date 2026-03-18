@@ -925,6 +925,11 @@ pub fn copy_to_pond(root_dir: String, name: String) -> Result<String, String> {
     std::fs::remove_dir_all(src)
         .map_err(|e| format!("Failed to remove source directory: {}", e))?;
 
+    // Verify source was deleted
+    if src.exists() {
+        return Err(format!("Source directory still exists after deletion: {}", expanded));
+    }
+
     Ok(dest_tilde)
 }
 
@@ -1170,6 +1175,10 @@ pub fn delete_gateway_dir(root_dir: String) -> Result<(), String> {
     if path.exists() {
         std::fs::remove_dir_all(path)
             .map_err(|e| format!("Failed to delete directory: {}", e))?;
+        // Verify deletion succeeded
+        if path.exists() {
+            return Err(format!("Directory still exists after deletion: {}", expanded));
+        }
     }
     Ok(())
 }

@@ -531,11 +531,8 @@ export default function Home() {
     if (action === "delete_old" && d.conflictId) {
       const oldGw = gateways.find((g) => g.id === d.conflictId);
       if (oldGw?.rootDir) {
-        try {
-          await invoke("delete_gateway_dir", { rootDir: oldGw.rootDir });
-        } catch (e) {
-          console.warn("[delete_old] failed to delete:", e);
-        }
+        await invoke("delete_gateway_dir", { rootDir: oldGw.rootDir });
+        // If delete fails, the function throws and we don't proceed
       }
     }
 
@@ -543,20 +540,16 @@ export default function Home() {
     if (action === "merge" && d.conflictId) {
       const oldGw = gateways.find((g) => g.id === d.conflictId);
       if (oldGw?.rootDir && d.rootDir) {
-        try {
-          await Promise.all([
-            invoke("db_merge_messages", { fromRootDir: oldGw.rootDir, toRootDir: d.rootDir }),
-            invoke("merge_workspace_files", {
-              fromRootDir: oldGw.rootDir,
-              toRootDir: d.rootDir,
-              appendMd: true,
-            }),
-          ]);
-          // Delete the old gateway directory after successful merge
-          await invoke("delete_gateway_dir", { rootDir: oldGw.rootDir });
-        } catch (e) {
-          console.warn("[merge] failed to merge:", e);
-        }
+        await Promise.all([
+          invoke("db_merge_messages", { fromRootDir: oldGw.rootDir, toRootDir: d.rootDir }),
+          invoke("merge_workspace_files", {
+            fromRootDir: oldGw.rootDir,
+            toRootDir: d.rootDir,
+            appendMd: true,
+          }),
+        ]);
+        // Delete the old gateway directory after successful merge - must succeed
+        await invoke("delete_gateway_dir", { rootDir: oldGw.rootDir });
       }
       // Fall through to overwrite logic below
     }
