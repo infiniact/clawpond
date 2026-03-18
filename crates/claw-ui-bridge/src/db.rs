@@ -394,6 +394,27 @@ pub fn save_all_messages(conn: &Connection, root_dir: &str, msgs: &[ChatMessage]
     Ok(())
 }
 
+/// Merge chat messages from one root_dir into another.
+/// Copies messages (INSERT OR IGNORE to skip duplicates), then deletes the source.
+pub fn merge_messages(conn: &Connection, from_root_dir: &str, to_root_dir: &str) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
+        "INSERT OR IGNORE INTO chat_messages
+         (id, root_dir, role, content, timestamp, tool_name, tool_status,
+          source_gw_id, source_gw_name, source_gw_emoji, mentions, agent_name)
+         SELECT id, ?2, role, content, timestamp, tool_name, tool_status,
+                source_gw_id, source_gw_name, source_gw_emoji, mentions, agent_name
+         FROM chat_messages WHERE root_dir = ?1",
+        params![from_root_dir, to_root_dir],
+    )?;
+    tx.execute(
+        "DELETE FROM chat_messages WHERE root_dir = ?1",
+        params![from_root_dir],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
 // ── Token Usage ──
 
 #[derive(Debug, Serialize, Deserialize)]

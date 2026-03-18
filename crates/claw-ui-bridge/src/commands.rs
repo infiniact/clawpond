@@ -890,6 +890,153 @@ pub fn toggle_agent_allowed(root_dir: String, agent_name: String, allow: bool) -
     Ok(())
 }
 
+/// Copy a gateway directory into ~/.openclaw/workspace/pond/{name}.
+/// If the source is already under the pond directory, returns the original path unchanged.
+/// Returns the new tilde-collapsed rootDir.
+#[tauri::command]
+pub fn copy_to_pond(root_dir: String, name: String) -> Result<String, String> {
+    let expanded = shellexpand::tilde(&root_dir).to_string();
+    let src = std::path::Path::new(&expanded);
+
+    let home = dirs::home_dir().ok_or("Cannot resolve home directory")?;
+    let pond_dir = home.join(".openclaw/workspace/pond");
+    let dest_tilde = format!("~/.openclaw/workspace/pond/{}", name);
+    let dest = pond_dir.join(&name);
+
+    // Already in pond — no-op
+    if src.starts_with(&pond_dir) {
+        return Ok(root_dir);
+    }
+
+    if !src.exists() {
+        return Err(format!("Source directory does not exist: {}", expanded));
+    }
+
+    std::fs::create_dir_all(&pond_dir)
+        .map_err(|e| format!("Failed to create pond directory: {}", e))?;
+
+    if dest.exists() {
+        return Err(format!("Target already exists: {}", dest.display()));
+    }
+
+    copy_dir_recursive(src, &dest)?;
+
+    Ok(dest_tilde)
+}
+
+fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> Result<(), String> {
+    std::fs::create_dir_all(dst)
+        .map_err(|e| format!("Failed to create {:?}: {}", dst, e))?;
+    for entry in std::fs::read_dir(src)
+        .map_err(|e| format!("Failed to read {:?}: {}", src, e))?
+        .flatten()
+    {
+        let path = entry.path();
+        let file_name = path.file_name().unwrap();
+        let dest = dst.join(file_name);
+        if path.is_dir() {
+            copy_dir_recursive(&path, &dest)?;
+        } else {
+            std::fs::copy(&path, &dest)
+                .map_err(|e| format!("Failed to copy {:?}: {}", file_name, e))?;
+        }
+    }
+    Ok(())
+}
+
+// ── Disk scan: discover existing gateways not yet imported ──
+
+#[derive(Serialize)]
+pub struct DiscoveredGateway {
+    #[serde(rename = "rootDir")]
+    pub root_dir: String,
+    #[serde(rename = "type")]
+    pub gw_type: String, // "local" | "docker"
+    pub name: String,
+}
+
+/// Scan well-known directories for gateway configs that may not be imported yet.
+#[tauri::command]
+pub fn scan_gateways() -> Vec<DiscoveredGateway> {
+    let mut results = Vec::new();
+
+    let home = match dirs::home_dir() {
+        Some(h) => h,
+        None => return results,
+    };
+
+    // 1. Check ~/.openclaw/openclaw.json → local ClawKing
+    let openclaw_home = home.join(".openclaw");
+    if openclaw_home.join("openclaw.json").exists() {
+        results.push(DiscoveredGateway {
+            root_dir: "~/.openclaw".to_string(),
+            gw_type: "local".to_string(),
+            name: "ClawKing".to_string(),
+        });
+    }
+
+    // 2. Scan ~/.openclaw/workspace/pond/* for docker gateways
+    let pond_dir = openclaw_home.join("workspace/pond");
+    if let Ok(entries) = std::fs::read_dir(&pond_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            if path.join("docker-compose.yml").exists()
+                || path.join("config/openclaw.json").exists()
+            {
+                let dir_name = path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string();
+                results.push(DiscoveredGateway {
+                    root_dir: format!("~/.openclaw/workspace/pond/{}", dir_name),
+                    gw_type: "docker".to_string(),
+                    name: dir_name,
+                });
+            }
+        }
+    }
+
+    // 3. Legacy paths: ~/clawpond/clawking/pond/* and ~/clawpond/pond/*
+    for legacy_base in &[
+        home.join("clawpond/clawking/pond"),
+        home.join("clawpond/pond"),
+    ] {
+        if let Ok(entries) = std::fs::read_dir(legacy_base) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if !path.is_dir() {
+                    continue;
+                }
+                if path.join("docker-compose.yml").exists()
+                    || path.join("config/openclaw.json").exists()
+                {
+                    let dir_name = path
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string();
+                    // Use tilde-collapsed path
+                    let rel = path
+                        .strip_prefix(&home)
+                        .map(|p| format!("~/{}", p.to_string_lossy()))
+                        .unwrap_or_else(|_| path.to_string_lossy().to_string());
+                    results.push(DiscoveredGateway {
+                        root_dir: rel,
+                        gw_type: "docker".to_string(),
+                        name: dir_name,
+                    });
+                }
+            }
+        }
+    }
+
+    results
+}
+
 // ── SQLite DB commands ──
 
 #[tauri::command]
@@ -925,6 +1072,145 @@ pub fn db_save_gateways(gateways: Vec<db::StoredGateway>, state: State<AppState>
     let guard = state.db()?;
     let conn = guard.as_ref().unwrap();
     db::save_gateways(&conn, &gateways).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn db_merge_messages(from_root_dir: String, to_root_dir: String, state: State<AppState>) -> Result<(), String> {
+    let guard = state.db()?;
+    let conn = guard.as_ref().unwrap();
+    db::merge_messages(&conn, &from_root_dir, &to_root_dir).map_err(|e| e.to_string())
+}
+
+/// Merge workspace files (memory/ folder and *.md) from one gateway root into another.
+/// When `append_md` is false, .md files that already exist at the destination are skipped.
+/// When `append_md` is true, .md files that already exist are appended to (content concatenated).
+/// After a successful merge, source files are deleted.
+#[tauri::command]
+pub fn merge_workspace_files(from_root_dir: String, to_root_dir: String, append_md: bool) -> Result<MergeFilesResult, String> {
+    let from_ws = resolve_workspace_dir(&from_root_dir)?;
+    let to_ws = resolve_workspace_dir(&to_root_dir)?;
+
+    let mut copied = 0u32;
+    let mut skipped = 0u32;
+    let mut appended = 0u32;
+
+    // 1. Merge memory/ directory (recursive, then delete source)
+    let from_memory = from_ws.join("memory");
+    let to_memory = to_ws.join("memory");
+    if from_memory.is_dir() {
+        std::fs::create_dir_all(&to_memory)
+            .map_err(|e| format!("Failed to create memory dir: {}", e))?;
+        merge_dir_recursive(&from_memory, &to_memory, append_md, &mut copied, &mut skipped, &mut appended)?;
+        // Remove source memory dir after merge
+        let _ = std::fs::remove_dir_all(&from_memory);
+    }
+
+    // 2. Merge *.md files at workspace root
+    if from_ws.is_dir() {
+        let entries: Vec<_> = std::fs::read_dir(&from_ws)
+            .map(|rd| rd.flatten().collect())
+            .unwrap_or_default();
+        for entry in entries {
+            let path = entry.path();
+            if path.is_file() {
+                if let Some(ext) = path.extension() {
+                    if ext.eq_ignore_ascii_case("md") {
+                        let file_name = path.file_name().unwrap();
+                        let dest = to_ws.join(file_name);
+                        if dest.exists() {
+                            if append_md {
+                                // Append source content to dest
+                                let src_content = std::fs::read_to_string(&path)
+                                    .map_err(|e| format!("Failed to read {:?}: {}", file_name, e))?;
+                                use std::io::Write;
+                                let mut f = std::fs::OpenOptions::new()
+                                    .append(true)
+                                    .open(&dest)
+                                    .map_err(|e| format!("Failed to open {:?} for append: {}", file_name, e))?;
+                                write!(f, "\n\n---\n\n{}", src_content)
+                                    .map_err(|e| format!("Failed to append to {:?}: {}", file_name, e))?;
+                                appended += 1;
+                            } else {
+                                skipped += 1;
+                            }
+                        } else {
+                            std::fs::copy(&path, &dest)
+                                .map_err(|e| format!("Failed to copy {:?}: {}", file_name, e))?;
+                            copied += 1;
+                        }
+                        // Delete source .md after merge
+                        let _ = std::fs::remove_file(&path);
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(MergeFilesResult { copied, skipped, appended })
+}
+
+#[derive(Serialize)]
+pub struct MergeFilesResult {
+    pub copied: u32,
+    pub skipped: u32,
+    pub appended: u32,
+}
+
+/// Recursively copy files from src_dir to dst_dir.
+/// For .md files when `append_md` is true, append content if dest exists.
+/// Other files that already exist are skipped.
+/// Source files are deleted after successful copy/append.
+fn merge_dir_recursive(
+    src_dir: &std::path::Path,
+    dst_dir: &std::path::Path,
+    append_md: bool,
+    copied: &mut u32,
+    skipped: &mut u32,
+    appended: &mut u32,
+) -> Result<(), String> {
+    if let Ok(entries) = std::fs::read_dir(src_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let file_name = path.file_name().unwrap();
+            let dest = dst_dir.join(file_name);
+
+            if path.is_dir() {
+                std::fs::create_dir_all(&dest)
+                    .map_err(|e| format!("Failed to create dir {:?}: {}", dest, e))?;
+                merge_dir_recursive(&path, &dest, append_md, copied, skipped, appended)?;
+                // Remove empty source dir
+                let _ = std::fs::remove_dir(&path);
+            } else if path.is_file() {
+                let is_md = path.extension()
+                    .map(|e| e.eq_ignore_ascii_case("md"))
+                    .unwrap_or(false);
+
+                if dest.exists() {
+                    if append_md && is_md {
+                        let src_content = std::fs::read_to_string(&path)
+                            .map_err(|e| format!("Failed to read {:?}: {}", file_name, e))?;
+                        use std::io::Write;
+                        let mut f = std::fs::OpenOptions::new()
+                            .append(true)
+                            .open(&dest)
+                            .map_err(|e| format!("Failed to open {:?} for append: {}", file_name, e))?;
+                        write!(f, "\n\n---\n\n{}", src_content)
+                            .map_err(|e| format!("Failed to append to {:?}: {}", file_name, e))?;
+                        *appended += 1;
+                    } else {
+                        *skipped += 1;
+                    }
+                } else {
+                    std::fs::copy(&path, &dest)
+                        .map_err(|e| format!("Failed to copy {:?}: {}", file_name, e))?;
+                    *copied += 1;
+                }
+                // Delete source file after merge
+                let _ = std::fs::remove_file(&path);
+            }
+        }
+    }
+    Ok(())
 }
 
 #[tauri::command]

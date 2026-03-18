@@ -11,6 +11,7 @@ import { AddGatewayModal } from "../components/modals/add-gateway-modal";
 import { DeleteGatewayModal } from "../components/modals/delete-gateway-modal";
 import { SettingsModal } from "../components/modals/settings-modal";
 import { GatewayContextMenu } from "../components/navigation/gateway-context-menu";
+import { DiscoveryBanner, type DiscoveredItem, type ConflictAction, type DiscoveredGateway } from "../components/discovery-banner";
 import { RpcPoolProvider } from "../lib/rpc/rpc-pool-context";
 import type { GatewayInfo } from "../lib/rpc/rpc-pool";
 import { openUrlInWindow } from "../lib/open-url";
@@ -62,6 +63,9 @@ export default function Home() {
   const [gatewayAgents, setGatewayAgents] = useState<Record<string, { agents: string[]; allowed: string[] }>>({});
   const [agentIcons, setAgentIcons] = useState<Record<string, string>>({});
 
+  // Discovered-but-not-imported gateways from disk scan
+  const [discoveredGateways, setDiscoveredGateways] = useState<DiscoveredItem[]>([]);
+
   // Hydrate from SQLite after mount (migration runs first)
   useEffect(() => {
     (async () => {
@@ -89,6 +93,49 @@ export default function Home() {
       setTheme(await loadTheme());
       setSecurityOfficerId(await loadSecurityOfficer());
       setAgentIcons(await loadAgentIcons());
+
+      // Scan disk for gateways — detect new, name clashes, and path mismatches
+      try {
+        const discovered = await invoke<DiscoveredGateway[]>("scan_gateways");
+        const byRootDir = new Map(loaded.map((g) => [g.rootDir, g]));
+        const byName = new Map(loaded.map((g) => [g.name.toLowerCase(), g]));
+
+        const items: DiscoveredItem[] = [];
+        for (const d of discovered) {
+          const existingByPath = byRootDir.get(d.rootDir);
+          const existingByName = byName.get(d.name.toLowerCase());
+
+          if (existingByPath) {
+            // rootDir already imported
+            if (existingByPath.name.toLowerCase() === d.name.toLowerCase()) {
+              // Fully matched — skip (duplicate)
+              continue;
+            }
+            // Same path but name differs on disk vs DB
+            items.push({
+              ...d,
+              conflict: "path_exists",
+              conflictWith: existingByPath.name,
+              conflictId: existingByPath.id,
+            });
+          } else if (existingByName) {
+            // Different rootDir but same name
+            items.push({
+              ...d,
+              conflict: "name_clash",
+              conflictWith: existingByName.name,
+              conflictId: existingByName.id,
+            });
+          } else {
+            // Completely new
+            items.push({ ...d, conflict: "new" });
+          }
+        }
+
+        if (items.length > 0) {
+          setDiscoveredGateways(items);
+        }
+      } catch { /* scan failed — non-critical */ }
 
       // Migrate legacy pond directories on disk (fire-and-forget)
       if (migrations.length > 0) {
@@ -463,6 +510,170 @@ export default function Home() {
     setAddGatewayModal(false);
   }
 
+  async function handleImportGateway(d: DiscoveredItem, action: ConflictAction) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    if (action === "skip") {
+      setDiscoveredGateways((prev) => prev.filter((x) => x.rootDir !== d.rootDir));
+      return;
+    }
+
+    // "merge": migrate old messages + workspace files (append .md) to new rootDir, then overwrite
+    if (action === "merge" && d.conflictId) {
+      const oldGw = gateways.find((g) => g.id === d.conflictId);
+      if (oldGw?.rootDir && d.rootDir) {
+        try {
+          await Promise.all([
+            invoke("db_merge_messages", { fromRootDir: oldGw.rootDir, toRootDir: d.rootDir }),
+            invoke("merge_workspace_files", {
+              fromRootDir: oldGw.rootDir,
+              toRootDir: d.rootDir,
+              appendMd: true,
+            }),
+          ]);
+        } catch (e) {
+          console.warn("[merge] failed to merge:", e);
+        }
+      }
+      // Fall through to overwrite logic below
+    }
+
+    // For new non-local gateways, copy source dir into pond
+    let rootDir = d.rootDir;
+    if (d.type !== "local" && !d.conflictId) {
+      try {
+        rootDir = await invoke<string>("copy_to_pond", { rootDir: d.rootDir, name: d.name });
+      } catch (e) {
+        console.warn("[import] copy_to_pond failed:", e);
+      }
+    }
+
+    setGateways((prev) => {
+      let next: Gateway[];
+
+      if (action === "update_name" && d.conflictId) {
+        // path_exists: update existing gateway's name to match disk
+        next = prev.map((g) =>
+          g.id === d.conflictId ? { ...g, name: d.name } : g
+        );
+      } else if (d.type === "local") {
+        // Local gateway always maps to the "default" slot
+        next = prev.map((g) =>
+          g.id === "default"
+            ? { ...g, rootDir, configured: true, serviceState: "loading" as const }
+            : g
+        );
+      } else if ((action === "overwrite" || action === "merge") && d.conflictId) {
+        // name_clash: replace existing gateway's rootDir
+        next = prev.map((g) =>
+          g.id === d.conflictId
+            ? { ...g, rootDir, configured: true, serviceState: "loading" as const }
+            : g
+        );
+      } else if (action === "delete_old" && d.conflictId) {
+        // name_clash: remove the old gateway, then add the discovered one as new
+        next = [
+          ...prev.filter((g) => g.id !== d.conflictId),
+          {
+            id: `gw-${Date.now()}`,
+            name: d.name,
+            emoji: "\u{1F916}",
+            type: "docker" as const,
+            rootDir,
+            configured: true,
+            serviceState: "loading" as const,
+          },
+        ];
+      } else {
+        // New import or "rename" — deduplicate the name
+        let name = d.name;
+        if (action === "rename" || prev.some((g) => g.name.toLowerCase() === name.toLowerCase())) {
+          const base = name;
+          let n = 2;
+          while (prev.some((g) => g.name.toLowerCase() === name.toLowerCase())) {
+            name = `${base}-${n}`;
+            n++;
+          }
+        }
+        next = [
+          ...prev,
+          {
+            id: `gw-${Date.now()}`,
+            name,
+            emoji: "\u{1F916}",
+            type: "docker" as const,
+            rootDir,
+            configured: true,
+            serviceState: "loading" as const,
+          },
+        ];
+      }
+
+      saveGateways(next);
+      return next;
+    });
+    setDiscoveredGateways((prev) => prev.filter((x) => x.rootDir !== d.rootDir));
+  }
+
+  async function handleImportAllGateways() {
+    const { invoke } = await import("@tauri-apps/api/core");
+    // Only auto-import items without conflicts
+    const safe = discoveredGateways.filter((d) => d.conflict === "new");
+    if (safe.length === 0) return;
+
+    // Copy non-local dirs into pond first
+    const resolved = await Promise.all(
+      safe.map(async (d) => {
+        if (d.type === "local") return { ...d, resolvedDir: d.rootDir };
+        try {
+          const newDir = await invoke<string>("copy_to_pond", { rootDir: d.rootDir, name: d.name });
+          return { ...d, resolvedDir: newDir };
+        } catch {
+          return { ...d, resolvedDir: d.rootDir };
+        }
+      })
+    );
+
+    setGateways((prev) => {
+      let next = [...prev];
+      const usedNames = new Set(next.map((g) => g.name.toLowerCase()));
+      for (const d of resolved) {
+        if (d.type === "local") {
+          next = next.map((g) =>
+            g.id === "default"
+              ? { ...g, rootDir: d.resolvedDir, configured: true, serviceState: "loading" as const }
+              : g
+          );
+        } else {
+          let name = d.name;
+          if (usedNames.has(name.toLowerCase())) {
+            const base = name;
+            let n = 2;
+            while (usedNames.has(name.toLowerCase())) {
+              name = `${base}-${n}`;
+              n++;
+            }
+          }
+          usedNames.add(name.toLowerCase());
+          next = [
+            ...next,
+            {
+              id: `gw-${Date.now()}-${d.name}`,
+              name,
+              emoji: "\u{1F916}",
+              type: "docker" as const,
+              rootDir: d.resolvedDir,
+              configured: true,
+              serviceState: "loading" as const,
+            },
+          ];
+        }
+      }
+      saveGateways(next);
+      return next;
+    });
+    setDiscoveredGateways((prev) => prev.filter((d) => d.conflict !== "new"));
+  }
+
   async function handleDeleteGateway(gatewayId: string, deleteFiles: boolean) {
     const gw = gateways.find((g) => g.id === gatewayId);
     if (!gw) return;
@@ -527,6 +738,12 @@ export default function Home() {
         onSettings={() => { setSettingsDraft(sharedDir); setSettingsModal(true); }}
         theme={theme}
         onToggleTheme={toggleTheme}
+      />
+      <DiscoveryBanner
+        items={discoveredGateways}
+        onImport={handleImportGateway}
+        onImportAll={handleImportAllGateways}
+        onDismiss={() => setDiscoveredGateways([])}
       />
       <div className="relative flex min-h-0 flex-1">
         <Sidebar
