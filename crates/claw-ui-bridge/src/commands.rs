@@ -890,7 +890,7 @@ pub fn toggle_agent_allowed(root_dir: String, agent_name: String, allow: bool) -
     Ok(())
 }
 
-/// Copy a gateway directory into ~/.openclaw/workspace/pond/{name}.
+/// Copy a gateway directory into ~/.openclaw/workspace/pond/{name}, then delete the source.
 /// If the source is already under the pond directory, returns the original path unchanged.
 /// Returns the new tilde-collapsed rootDir.
 #[tauri::command]
@@ -920,6 +920,10 @@ pub fn copy_to_pond(root_dir: String, name: String) -> Result<String, String> {
     }
 
     copy_dir_recursive(src, &dest)?;
+
+    // Delete source after successful copy
+    std::fs::remove_dir_all(src)
+        .map_err(|e| format!("Failed to remove source directory: {}", e))?;
 
     Ok(dest_tilde)
 }

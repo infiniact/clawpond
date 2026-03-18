@@ -15,7 +15,7 @@ export type ConflictKind =
   | "path_exists"        // same rootDir already imported but name differs on disk
   | "duplicate";         // rootDir already imported and name matches on disk (fully duplicated — not shown)
 
-export type ConflictAction = "overwrite" | "merge" | "delete_old" | "skip" | "rename" | "update_name";
+export type ConflictAction = "import" | "overwrite" | "merge" | "delete_old" | "skip" | "rename" | "update_name";
 
 export type DiscoveredItem = DiscoveredGateway & {
   conflict: ConflictKind;
@@ -107,7 +107,7 @@ function DiscoveredRow({
         <span className="truncate text-text-ghost">{item.rootDir}</span>
         {item.conflict === "new" ? (
           <button
-            onClick={() => onAction("skip")}
+            onClick={() => onAction("import")}
             className="ml-auto shrink-0 rounded-md bg-accent-emerald/15 px-2 py-0.5 text-[11px] font-medium text-accent-emerald transition-colors hover:bg-accent-emerald/25"
           >
             {"\u5BFC\u5165"}

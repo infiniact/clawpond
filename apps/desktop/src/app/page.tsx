@@ -97,12 +97,17 @@ export default function Home() {
       // Scan disk for gateways — detect new, name clashes, and path mismatches
       try {
         const discovered = await invoke<DiscoveredGateway[]>("scan_gateways");
-        const byRootDir = new Map(loaded.map((g) => [g.rootDir, g]));
+
+        // Normalize rootDir for comparison: trim trailing slash, lowercase
+        const norm = (p: string | null) => (p ?? "").replace(/\/+$/, "").toLowerCase();
+
+        const byRootDir = new Map(loaded.map((g) => [norm(g.rootDir), g]));
         const byName = new Map(loaded.map((g) => [g.name.toLowerCase(), g]));
 
         const items: DiscoveredItem[] = [];
         for (const d of discovered) {
-          const existingByPath = byRootDir.get(d.rootDir);
+          const dNorm = norm(d.rootDir);
+          const existingByPath = byRootDir.get(dNorm);
           const existingByName = byName.get(d.name.toLowerCase());
 
           if (existingByPath) {
@@ -119,6 +124,11 @@ export default function Home() {
               conflictId: existingByPath.id,
             });
           } else if (existingByName) {
+            // Same name found — check if rootDir also matches (just stored differently)
+            if (norm(existingByName.rootDir) === dNorm) {
+              // Same gateway, rootDir format differs — skip
+              continue;
+            }
             // Different rootDir but same name
             items.push({
               ...d,
