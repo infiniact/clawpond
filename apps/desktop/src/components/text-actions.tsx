@@ -72,7 +72,7 @@ export function TextActionMenu({ text, onClose }: TextActionMenuProps) {
   return (
     <div
       ref={menuRef}
-      className="flex items-center gap-1 rounded-lg bg-bg-deep px-1.5 py-1 shadow-lg ring-1 ring-border-default"
+      className="flex items-center gap-1 whitespace-nowrap rounded-lg bg-bg-deep px-1.5 py-1 shadow-lg ring-1 ring-border-default"
     >
       <button
         onClick={handleCopy}
