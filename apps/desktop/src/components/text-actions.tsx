@@ -125,15 +125,15 @@ export function TextWithActions({
   const handleMouseUp = useCallback((e: React.MouseEvent) => {
     const selection = window.getSelection();
     const selectedText = selection?.toString().trim();
-    
+
     if (selectedText && selection && containerRef.current?.contains(selection.anchorNode as Node)) {
       const range = selection.getRangeAt(0);
       const rect = range.getBoundingClientRect();
-      const containerRect = containerRef.current.getBoundingClientRect();
-      
+
+      // 使用视口坐标，避免被父容器边界限制
       setMenuPos({
-        x: rect.left - containerRect.left + rect.width / 2,
-        y: rect.top - containerRect.top - 8
+        x: rect.left + rect.width / 2,
+        y: rect.top - 8
       });
       setShowMenu(true);
     } else {
@@ -156,7 +156,7 @@ export function TextWithActions({
       
       {showMenu && (
         <div
-          className="absolute z-50"
+          className="fixed z-50"
           style={{
             left: menuPos.x,
             top: menuPos.y,
