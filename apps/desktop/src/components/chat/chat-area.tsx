@@ -28,6 +28,7 @@ import {
 import { MentionPopup } from "./mention-popup";
 import { UsageHeatmap } from "../usage-heatmap";
 import { ConfigWizard } from "../config/config-wizard";
+import { A2UIPanel } from "../a2ui-panel";
 import { OpenClawRpc } from "../../lib/rpc/openclaw-rpc";
 import type { RpcEvent } from "../../lib/rpc/openclaw-rpc";
 import { useRpcPool } from "../../lib/rpc/rpc-pool-context";
@@ -381,7 +382,13 @@ export function ChatArea({
         />
       </div>
       {configured && (
-        <SplitPane showChat={showChat}>
+        <SplitPane
+          showChat={showChat}
+          agents={allAgents}
+          allowedAgents={allowedAgents || []}
+          runningAgents={runningAgents}
+          agentIcons={agentIcons || {}}
+        >
           <ChatView rootDir={rootDir} serviceState={serviceState} lastError={lastError} startProgress={startProgress} hidden={hidden} gatewayId={gatewayId} gatewayName={gatewayName} gatewayEmoji={gatewayEmoji} gatewayType={gatewayType} onBusyChange={onBusyChange} securityOfficerId={securityOfficerId} agents={agents} agentIcons={agentIcons} onRunningAgentsChange={setRunningAgents} onDiscoveredAgentsChange={setDiscoveredAgents} />
         </SplitPane>
       )}
@@ -389,9 +396,23 @@ export function ChatArea({
   );
 }
 
-/** Dual-column split pane: left = children (chat), right = A2UI placeholder */
-function SplitPane({ showChat, children }: { showChat: boolean; children: React.ReactNode }) {
-  const [leftRatio, setLeftRatio] = useState(0.5);
+/** Dual-column split pane: left = children (chat), right = A2UI panel */
+function SplitPane({
+  showChat,
+  agents,
+  allowedAgents,
+  runningAgents,
+  agentIcons,
+  children,
+}: {
+  showChat: boolean;
+  agents: string[];
+  allowedAgents: string[];
+  runningAgents: Set<string>;
+  agentIcons: Record<string, string>;
+  children: React.ReactNode;
+}) {
+  const [leftRatio, setLeftRatio] = useState(0.6);
   const containerRef = useRef<HTMLDivElement>(null);
   const dragging = useRef(false);
 
@@ -403,7 +424,7 @@ function SplitPane({ showChat, children }: { showChat: boolean; children: React.
       if (!dragging.current || !containerRef.current) return;
       const rect = containerRef.current.getBoundingClientRect();
       const ratio = (ev.clientX - rect.left) / rect.width;
-      setLeftRatio(Math.max(0.2, Math.min(0.8, ratio)));
+      setLeftRatio(Math.max(0.3, Math.min(0.75, ratio)));
     };
 
     const onMouseUp = () => {
@@ -436,9 +457,14 @@ function SplitPane({ showChat, children }: { showChat: boolean; children: React.
         onMouseDown={handleMouseDown}
       />
 
-      {/* Right column: A2UI placeholder */}
-      <div className="flex min-h-0 flex-1 flex-col items-center justify-center bg-bg-deep">
-        <p className="text-[12px] text-text-ghost">A2UI</p>
+      {/* Right column: A2UI Panel */}
+      <div className="flex min-h-0 flex-1 flex-col">
+        <A2UIPanel
+          agents={agents}
+          allowedAgents={allowedAgents}
+          runningAgents={runningAgents}
+          agentIcons={agentIcons}
+        />
       </div>
     </div>
   );
