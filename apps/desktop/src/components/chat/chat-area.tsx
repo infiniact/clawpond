@@ -2489,10 +2489,10 @@ function MessageBubble({
     const range = sel?.getRangeAt(0);
     if (!range) return;
     const rect = range.getBoundingClientRect();
-    const parentRect = bubbleRef.current.getBoundingClientRect();
+    // 使用视口坐标，避免被父容器边界限制
     setPopup({
-      x: rect.left - parentRect.left + rect.width / 2,
-      y: rect.top - parentRect.top - 8,
+      x: rect.left + rect.width / 2,
+      y: rect.top - 8,
       text,
     });
   }, []);
@@ -2646,7 +2646,7 @@ function MessageBubble({
         {popup && (
           <div
             ref={popupRef}
-            className="absolute z-50 flex items-center gap-1 rounded-lg bg-bg-deep px-1.5 py-1 shadow-lg ring-1 ring-border-default"
+            className="fixed z-50 inline-flex items-center gap-1 rounded-lg bg-bg-deep px-1.5 py-1 shadow-lg ring-1 ring-border-default"
             style={{
               left: popup.x,
               top: popup.y,
@@ -2655,7 +2655,7 @@ function MessageBubble({
           >
             <button
               onClick={handleCopyMessage}
-              className="flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium text-accent-emerald transition-colors hover:bg-accent-emerald/15"
+              className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-md px-2 py-1 text-[11px] font-medium text-accent-emerald transition-colors hover:bg-accent-emerald/15"
               title="复制"
             >
               <IconCopy size={10} />
@@ -2663,7 +2663,7 @@ function MessageBubble({
             </button>
             <button
               onClick={handleExportPDF}
-              className="flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium text-text-secondary transition-colors hover:bg-bg-hover"
+              className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-md px-2 py-1 text-[11px] font-medium text-text-secondary transition-colors hover:bg-bg-hover"
               title="导出 PDF"
             >
               <IconFile size={10} />
@@ -2671,7 +2671,7 @@ function MessageBubble({
             </button>
             <button
               onClick={handleWeChatShare}
-              className="flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium text-text-secondary transition-colors hover:bg-bg-hover"
+              className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-md px-2 py-1 text-[11px] font-medium text-text-secondary transition-colors hover:bg-bg-hover"
               title="微信分享"
             >
               <IconShare size={10} />
@@ -2679,7 +2679,7 @@ function MessageBubble({
             </button>
             <button
               onClick={handleAddToContext}
-              className="flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium text-accent-emerald transition-colors hover:bg-accent-emerald/15"
+              className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-md px-2 py-1 text-[11px] font-medium text-accent-emerald transition-colors hover:bg-accent-emerald/15"
             >
               <IconChevronDown size={10} className="rotate-90" />
               Add to input
