@@ -72,11 +72,11 @@ export function TextActionMenu({ text, onClose }: TextActionMenuProps) {
   return (
     <div
       ref={menuRef}
-      className="flex items-center gap-1 whitespace-nowrap rounded-lg bg-bg-deep px-1.5 py-1 shadow-lg ring-1 ring-border-default"
+      className="flex flex-nowrap items-center gap-1 whitespace-nowrap rounded-lg bg-bg-deep px-1.5 py-1 shadow-lg ring-1 ring-border-default"
     >
       <button
         onClick={handleCopy}
-        className="flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium text-accent-emerald transition-colors hover:bg-accent-emerald/15"
+        className="flex items-center gap-1 whitespace-nowrap rounded-md px-2 py-1 text-[11px] font-medium text-accent-emerald transition-colors hover:bg-accent-emerald/15"
         title="复制"
       >
         <IconCopy size={12} />
@@ -86,7 +86,7 @@ export function TextActionMenu({ text, onClose }: TextActionMenuProps) {
       <button
         onClick={handleExportPDF}
         disabled={exporting}
-        className="flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium text-text-secondary transition-colors hover:bg-bg-hover disabled:opacity-50"
+        className="flex items-center gap-1 whitespace-nowrap rounded-md px-2 py-1 text-[11px] font-medium text-text-secondary transition-colors hover:bg-bg-hover disabled:opacity-50"
         title="导出 PDF"
       >
         <IconFile size={12} />
@@ -95,7 +95,7 @@ export function TextActionMenu({ text, onClose }: TextActionMenuProps) {
 
       <button
         onClick={handleWeChatShare}
-        className="flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium text-text-secondary transition-colors hover:bg-bg-hover"
+        className="flex items-center gap-1 whitespace-nowrap rounded-md px-2 py-1 text-[11px] font-medium text-text-secondary transition-colors hover:bg-bg-hover"
         title="微信分享"
       >
         <IconShare size={12} />
