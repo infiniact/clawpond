@@ -53,6 +53,8 @@ type Message = {
   sourceGateway?: { id: string; name: string; emoji: string };
   /** Gateway IDs mentioned in this message */
   mentions?: string[];
+  /** Images attached to the message */
+  images?: { name: string; mediaType: string; base64: string }[];
   /** Agent name (workspace agent) that produced this message */
   agentName?: string;
 };
@@ -1470,6 +1472,9 @@ function ChatView({ rootDir, serviceState, lastError, startProgress, hidden, gat
       role: "user",
       content: displayContent,
       timestamp: new Date(),
+      images: images.length > 0
+        ? images.map((img) => ({ name: img.name, mediaType: img.mediaType, base64: img.base64 }))
+        : undefined,
     };
     setMessages((prev) => [...prev, userMsg]);
 
@@ -1606,6 +1611,9 @@ function ChatView({ rootDir, serviceState, lastError, startProgress, hidden, gat
       content: displayContent,
       timestamp: new Date(),
       mentions: mentionedIds.length > 0 ? mentionedIds : undefined,
+      images: images.length > 0
+        ? images.map((img) => ({ name: img.name, mediaType: img.mediaType, base64: img.base64 }))
+        : undefined,
     };
     setMessages((prev) => [...prev, userMsg]);
     setInput("");
@@ -2734,7 +2742,22 @@ function MessageBubble({
           </div>
         )}
         {msg.role === "user" ? (
-          msg.content
+          <>
+            {msg.images && msg.images.length > 0 && (
+              <div className="mb-1.5 flex flex-wrap gap-1.5">
+                {msg.images.map((img, i) => (
+                  <div key={i} className="overflow-hidden rounded-lg ring-1 ring-border-default">
+                    <img
+                      src={`data:${img.mediaType};base64,${img.base64}`}
+                      alt={img.name}
+                      className="max-h-48 max-w-48 rounded-lg object-cover"
+                    />
+                  </div>
+                ))}
+              </div>
+            )}
+            <span className="whitespace-pre-wrap">{msg.content}</span>
+          </>
         ) : (
           <div className="prose-chat">
             <ReactMarkdown
