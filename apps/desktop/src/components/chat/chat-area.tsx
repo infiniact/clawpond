@@ -1806,6 +1806,7 @@ function ChatView({ rootDir, serviceState, lastError, startProgress, hidden, gat
             rootDir,
             fileName,
             base64Data: match[2],
+            gatewayType,
           });
           setImageAttachments((prev) => [...prev, {
             name: fileName,
@@ -1839,6 +1840,7 @@ function ChatView({ rootDir, serviceState, lastError, startProgress, hidden, gat
             rootDir,
             fileName,
             base64Data: base64,
+            gatewayType,
           });
           setFileAttachments((prev) => [...prev, { name: fileName, containerPath }]);
         } catch (err) {
@@ -1884,7 +1886,7 @@ function ChatView({ rootDir, serviceState, lastError, startProgress, hidden, gat
           // Actually, in Tauri desktop, File objects from <input> have a `path` property
           const filePath = (file as unknown as { path?: string }).path;
           if (filePath) {
-            containerPath = await invoke<string>("copy_to_workspace", { rootDir, sourcePath: filePath });
+            containerPath = await invoke<string>("copy_to_workspace", { rootDir, sourcePath: filePath, gatewayType });
           }
           // Fallback: if file.path is unavailable (Tauri v2), send base64 directly
           if (!containerPath) {
@@ -1892,6 +1894,7 @@ function ChatView({ rootDir, serviceState, lastError, startProgress, hidden, gat
               rootDir,
               fileName: file.name,
               base64Data: match[2],
+              gatewayType,
             });
           }
         } catch (err) {
@@ -1927,7 +1930,7 @@ function ChatView({ rootDir, serviceState, lastError, startProgress, hidden, gat
       if (!paths || paths.length === 0) return;
       for (const sourcePath of paths) {
         try {
-          const containerPath = await invoke<string>("copy_to_workspace", { rootDir, sourcePath });
+          const containerPath = await invoke<string>("copy_to_workspace", { rootDir, sourcePath, gatewayType });
           const name = sourcePath.split("/").pop() || sourcePath;
           setFileAttachments((prev) => [...prev, { name, containerPath }]);
         } catch (err) {
