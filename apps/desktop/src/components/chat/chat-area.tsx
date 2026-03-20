@@ -2369,48 +2369,50 @@ function ChatView({ rootDir, serviceState, lastError, startProgress, hidden, gat
             </div>
           )}
 
-          {/* Image preview strip */}
-          {imageAttachments.length > 0 && (
-            <div className="flex flex-wrap gap-2">
-              {imageAttachments.map((img, i) => (
-                <div key={i} className="group relative h-16 w-16 overflow-hidden rounded-lg ring-1 ring-border-default">
-                  <img src={`data:${img.mediaType};base64,${img.base64}`} alt={img.name} className="h-full w-full object-cover" />
-                  <button
-                    onClick={() => removeImage(i)}
-                    className="absolute -right-1 -top-1 flex h-4 w-4 items-center justify-center rounded-full bg-bg-deep text-text-tertiary opacity-0 ring-1 ring-border-default transition-opacity group-hover:opacity-100"
-                  >
-                    <IconX size={8} />
-                  </button>
-                </div>
-              ))}
-            </div>
-          )}
+          {/* Input box: preview strips + textarea + send button */}
+          <div className="flex flex-col rounded-xl bg-bg-surface ring-1 ring-border-default transition-all">
+            {/* Image preview strip */}
+            {imageAttachments.length > 0 && (
+              <div className="flex flex-wrap gap-2 border-b border-border-subtle px-3 pt-3 pb-1">
+                {imageAttachments.map((img, i) => (
+                  <div key={i} className="group relative h-16 w-16 overflow-hidden rounded-lg ring-1 ring-border-default">
+                    <img src={`data:${img.mediaType};base64,${img.base64}`} alt={img.name} className="h-full w-full object-cover" />
+                    <button
+                      onClick={() => removeImage(i)}
+                      className="absolute -right-1 -top-1 flex h-4 w-4 items-center justify-center rounded-full bg-bg-deep text-text-tertiary opacity-0 ring-1 ring-border-default transition-opacity group-hover:opacity-100"
+                    >
+                      <IconX size={8} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
 
-          {/* File preview strip */}
-          {fileAttachments.length > 0 && (
-            <div className="flex flex-wrap gap-2">
-              {fileAttachments.map((file, i) => (
-                <div key={i} className="group relative flex items-center gap-1.5 rounded-lg bg-bg-surface px-2.5 py-1.5 ring-1 ring-border-default">
-                  <IconFile size={12} className="shrink-0 text-text-ghost" />
-                  <span className="max-w-[160px] truncate text-[11px] text-text-secondary">{file.name}</span>
-                  <button
-                    onClick={() => removeFile(i)}
-                    className="flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-full text-text-ghost opacity-0 transition-opacity hover:text-text-tertiary group-hover:opacity-100"
-                  >
-                    <IconX size={8} />
-                  </button>
-                </div>
-              ))}
-            </div>
-          )}
+            {/* File preview strip */}
+            {fileAttachments.length > 0 && (
+              <div className="flex flex-wrap gap-2 border-b border-border-subtle px-3 pt-2 pb-1">
+                {fileAttachments.map((file, i) => (
+                  <div key={i} className="group relative flex items-center gap-1.5 rounded-lg bg-bg-elevated px-2.5 py-1.5 ring-1 ring-border-subtle">
+                    <IconFile size={12} className="shrink-0 text-text-ghost" />
+                    <span className="max-w-[160px] truncate text-[11px] text-text-secondary">{file.name}</span>
+                    <button
+                      onClick={() => removeFile(i)}
+                      className="flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-full text-text-ghost opacity-0 transition-opacity hover:text-text-tertiary group-hover:opacity-100"
+                    >
+                      <IconX size={8} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
 
-          <div className="flex rounded-xl bg-bg-surface ring-1 ring-border-default transition-all focus-within:ring-border-strong">
-            <textarea
-              ref={inputRef}
-              value={input}
-              onChange={(e) => {
-                const val = e.target.value;
-                setInput(val);
+            <div className="flex">
+              <textarea
+                ref={inputRef}
+                value={input}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  setInput(val);
 
                 // Detect @ mention trigger
                 const cursorPos = e.target.selectionStart || 0;
@@ -2435,7 +2437,7 @@ function ChatView({ rootDir, serviceState, lastError, startProgress, hidden, gat
               placeholder={isSecurityOfficer ? "Security Officer — direct chat disabled" : "Message... (@ to mention, ⌘+Enter to send)"}
               rows={4}
               disabled={isSecurityOfficer}
-              className="flex-1 resize-none bg-transparent px-3.5 py-3 pr-10 text-[13px] leading-relaxed text-text-primary placeholder:text-text-ghost focus:outline-none disabled:opacity-50"
+              className="flex-1 resize-none bg-transparent px-3.5 py-3 pr-10 text-[13px] leading-relaxed text-text-primary placeholder:text-text-ghost focus:outline-none focus:ring-0 disabled:opacity-50"
             />
             <button
               onClick={handleSend}
@@ -2445,6 +2447,7 @@ function ChatView({ rootDir, serviceState, lastError, startProgress, hidden, gat
             >
               <IconSend size={14} />
             </button>
+            </div>
           </div>
 
           {/* @ Mention Popup */}
@@ -2479,7 +2482,6 @@ function ChatView({ rootDir, serviceState, lastError, startProgress, hidden, gat
               }}
             />
           )}
-
         </div>
       </div>
     </div>
