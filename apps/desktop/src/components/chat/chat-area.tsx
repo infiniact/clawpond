@@ -1437,7 +1437,10 @@ function ChatView({ rootDir, serviceState, lastError, startProgress, hidden, gat
     const imageFileSuffix = imagePaths.length > 0
       ? "\n\n" + imagePaths.map((img) => `[Image: ${img.containerPath}]`).join("\n")
       : "";
-    const fullText = (text + fileSuffix + imageFileSuffix).trim();
+    const imageHint = imagePaths.length > 0
+      ? "\n\n[系统提示: 以上包含图片文件路径，请使用图片工具读取并分析图片内容]"
+      : "";
+    const fullText = (text + fileSuffix + imageFileSuffix + imageHint).trim();
 
     // Build display content
     const filePart = files.length > 0 ? `[${files.length} file(s)]` : "";
@@ -1572,7 +1575,10 @@ function ChatView({ rootDir, serviceState, lastError, startProgress, hidden, gat
     const imageFileSuffix = imagePaths.length > 0
       ? "\n\n" + imagePaths.map((img) => `[Image: ${img.containerPath}]`).join("\n")
       : "";
-    const fullText = (text + fileSuffix + imageFileSuffix).trim();
+    const imageHint = imagePaths.length > 0
+      ? "\n\n[系统提示: 以上包含图片文件路径，请使用图片工具读取并分析图片内容]"
+      : "";
+    const fullText = (text + fileSuffix + imageFileSuffix + imageHint).trim();
 
     // Build content for local UI display
     const filePart = files.length > 0 ? `[${files.length} file(s)]` : "";
