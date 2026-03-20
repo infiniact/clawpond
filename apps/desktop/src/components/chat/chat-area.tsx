@@ -2435,8 +2435,16 @@ function ChatView({ rootDir, serviceState, lastError, startProgress, hidden, gat
               placeholder={isSecurityOfficer ? "Security Officer — direct chat disabled" : "Message... (@ to mention, ⌘+Enter to send)"}
               rows={4}
               disabled={isSecurityOfficer}
-              className="flex-1 resize-none bg-transparent px-3.5 py-3 text-[13px] leading-relaxed text-text-primary placeholder:text-text-ghost focus:outline-none disabled:opacity-50"
+              className="flex-1 resize-none bg-transparent px-3.5 py-3 pr-10 text-[13px] leading-relaxed text-text-primary placeholder:text-text-ghost focus:outline-none disabled:opacity-50"
             />
+            <button
+              onClick={handleSend}
+              disabled={isSecurityOfficer || (!input.trim() && imageAttachments.length === 0 && fileAttachments.length === 0)}
+              className="m-1.5 flex h-7 w-7 shrink-0 self-start items-center justify-center rounded-lg text-text-tertiary transition-colors hover:bg-bg-hover hover:text-accent-emerald disabled:opacity-30"
+              title={sending ? "Queue message" : "Send message"}
+            >
+              <IconSend size={14} />
+            </button>
           </div>
 
           {/* @ Mention Popup */}
@@ -2472,69 +2480,6 @@ function ChatView({ rootDir, serviceState, lastError, startProgress, hidden, gat
             />
           )}
 
-          {/* Toolbar: left actions + right send */}
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-1">
-              {/* Hidden file input */}
-              <input
-                ref={imageInputRef}
-                type="file"
-                accept="image/*"
-                multiple
-                className="hidden"
-                onChange={handleImagePick}
-              />
-              <button
-                onClick={() => imageInputRef.current?.click()}
-                disabled={isSecurityOfficer}
-                className="flex h-8 w-8 items-center justify-center rounded-lg text-text-tertiary transition-colors hover:bg-bg-hover hover:text-text-secondary disabled:opacity-30"
-                title="Insert image"
-              >
-                <IconImage size={16} />
-              </button>
-              <button
-                onClick={handleFilePick}
-                disabled={!rootDir || isSecurityOfficer}
-                className="flex h-8 w-8 items-center justify-center rounded-lg text-text-tertiary transition-colors hover:bg-bg-hover hover:text-text-secondary disabled:opacity-30"
-                title="Attach file"
-              >
-                <IconFile size={16} />
-              </button>
-              <button
-                onClick={handleVoiceInput}
-                disabled={isSecurityOfficer}
-                className={`flex h-8 w-8 items-center justify-center rounded-lg transition-colors disabled:opacity-30 ${
-                  voiceListening
-                    ? "bg-accent-red/15 text-accent-red ring-1 ring-accent-red/25 animate-pulse"
-                    : "text-text-tertiary hover:bg-bg-hover hover:text-text-secondary"
-                }`}
-                title={voiceListening ? "Stop listening" : "Voice input"}
-              >
-                <IconMic size={16} />
-              </button>
-            </div>
-
-            {sending ? (
-              <button
-                onClick={handleSend}
-                disabled={isSecurityOfficer || (!input.trim() && imageAttachments.length === 0 && fileAttachments.length === 0)}
-                className="flex h-9 items-center gap-1.5 rounded-xl bg-accent-emerald/15 px-4 text-[12px] font-medium text-accent-emerald ring-1 ring-accent-emerald/25 transition-all hover:bg-accent-emerald/25 disabled:opacity-30 disabled:hover:bg-accent-emerald/15"
-                title="Queue message (will send when current response completes)"
-              >
-                <IconSend size={14} />
-                <span>Queue</span>
-              </button>
-            ) : (
-              <button
-                onClick={handleSend}
-                disabled={isSecurityOfficer || (!input.trim() && imageAttachments.length === 0 && fileAttachments.length === 0)}
-                className="flex h-9 items-center gap-1.5 rounded-xl bg-accent-emerald/15 px-4 text-[12px] font-medium text-accent-emerald ring-1 ring-accent-emerald/25 transition-all hover:bg-accent-emerald/25 disabled:opacity-30 disabled:hover:bg-accent-emerald/15"
-              >
-                <IconSend size={14} />
-                <span>Send</span>
-              </button>
-            )}
-          </div>
         </div>
       </div>
     </div>
