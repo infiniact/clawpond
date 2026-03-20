@@ -598,28 +598,38 @@ export function ConfigWizard({ onComplete, onClose, fixedRootDir, gatewayType = 
           if (!defaults.models) defaults.models = {};
           (defaults.models as Record<string, unknown>)[config.imageModelName] = {};
 
-          // Add image model custom provider if needed and different from chat model provider
+          // Add image model custom provider if needed
           const imageProviderPrefix = config.imageModelProvider.split("-")[0];
           if (!builtinProviders.includes(imageProviderPrefix)) {
             const imgApiBase = config.imageApiEndpoint || PROVIDERS.find((p) => p.id === config.imageModelProvider)?.apiBase || "";
             if (imgApiBase) {
               const imgModelId = config.imageModelName.includes("/") ? config.imageModelName.split("/").slice(1).join("/") : config.imageModelName;
+              const imgModelEntry = {
+                id: imgModelId,
+                name: imgModelId,
+                reasoning: false,
+                input: ["text", "image"],
+                contextWindow: 128000,
+                maxTokens: 32768,
+              };
               if (!openclawConfig.models) openclawConfig.models = { providers: {} };
               const models = openclawConfig.models as Record<string, unknown>;
               if (!models.providers) models.providers = {};
               const providers = models.providers as Record<string, unknown>;
-              providers[imageProviderPrefix] = {
-                baseUrl: imgApiBase,
-                api: "openai-completions",
-                models: [{
-                  id: imgModelId,
-                  name: imgModelId,
-                  reasoning: false,
-                  input: ["text"],
-                  contextWindow: 128000,
-                  maxTokens: 32768,
-                }],
-              };
+              // Merge with existing provider if same provider (e.g. zhipu for both chat and image)
+              if (providers[imageProviderPrefix] && typeof providers[imageProviderPrefix] === "object") {
+                const existingProvider = providers[imageProviderPrefix] as Record<string, unknown>;
+                const existingModels = (existingProvider.models as unknown[]) || [];
+                if (!existingModels.some((m: any) => m.id === imgModelId)) {
+                  existingModels.push(imgModelEntry);
+                }
+              } else {
+                providers[imageProviderPrefix] = {
+                  baseUrl: imgApiBase,
+                  api: "openai-completions",
+                  models: [imgModelEntry],
+                };
+              }
             }
           }
         }
