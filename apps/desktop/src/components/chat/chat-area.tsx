@@ -1775,6 +1775,83 @@ function ChatView({ rootDir, serviceState, lastError, startProgress, hidden, gat
     }
   }
 
+  async function handlePaste(e: React.ClipboardEvent<HTMLTextAreaElement>) {
+    if (!rootDir) return;
+    const items = e.clipboardData?.items;
+    if (!items) return;
+
+    let handled = false;
+    const { invoke } = await import("@tauri-apps/api/core");
+
+    for (const item of Array.from(items)) {
+      // Image from clipboard (screenshot, copied image)
+      if (item.type.startsWith("image/")) {
+        e.preventDefault();
+        handled = true;
+        const blob = item.getAsFile();
+        if (!blob) continue;
+
+        const dataUrl = await new Promise<string>((resolve) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result as string);
+          reader.readAsDataURL(blob);
+        });
+        const match = dataUrl.match(/^data:([^;]+);base64,(.+)$/);
+        if (!match) continue;
+
+        try {
+          const ext = match[1].split("/")[1] || "png";
+          const fileName = `paste-${Date.now()}.${ext}`;
+          const containerPath = await invoke<string>("save_base64_to_workspace", {
+            rootDir,
+            fileName,
+            base64Data: match[2],
+          });
+          setImageAttachments((prev) => [...prev, {
+            name: fileName,
+            mediaType: match[1],
+            base64: match[2],
+            containerPath,
+          }]);
+        } catch (err) {
+          console.warn("[paste] Failed to save pasted image:", err);
+        }
+      }
+
+      // File from clipboard (copied file in Finder)
+      if (item.kind === "file") {
+        e.preventDefault();
+        handled = true;
+        const file = item.getAsFile();
+        if (!file) continue;
+        // Skip if already handled as image
+        if (file.type.startsWith("image/")) continue;
+
+        try {
+          const arrayBuffer = await file.arrayBuffer();
+          const uint8 = new Uint8Array(arrayBuffer);
+          let binary = "";
+          for (let i = 0; i < uint8.length; i++) binary += String.fromCharCode(uint8[i]);
+          const base64 = btoa(binary);
+
+          const fileName = file.name || `paste-${Date.now()}`;
+          const containerPath = await invoke<string>("save_base64_to_workspace", {
+            rootDir,
+            fileName,
+            base64Data: base64,
+          });
+          setFileAttachments((prev) => [...prev, { name: fileName, containerPath }]);
+        } catch (err) {
+          console.warn("[paste] Failed to save pasted file:", err);
+        }
+      }
+    }
+
+    if (handled) {
+      e.preventDefault();
+    }
+  }
+
   // Image attachment handler — reads base64 for preview and copies to workspace for agent access
   async function handleImagePick(e: React.ChangeEvent<HTMLInputElement>) {
     const files = e.target.files;
@@ -2332,6 +2409,7 @@ function ChatView({ rootDir, serviceState, lastError, startProgress, hidden, gat
                 }
               }}
               onKeyDown={handleKeyDown}
+              onPaste={handlePaste}
               onCompositionStart={handleCompositionStart}
               onCompositionEnd={handleCompositionEnd}
               placeholder={isSecurityOfficer ? "Security Officer — direct chat disabled" : "Message... (@ to mention, ⌘+Enter to send)"}
