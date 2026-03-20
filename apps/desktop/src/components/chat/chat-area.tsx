@@ -1280,34 +1280,14 @@ function ChatView({ rootDir, serviceState, lastError, startProgress, hidden, gat
   }
 
   // Gateway image support capability — probed once per connection
-  const imageSupport = useRef<"unknown" | "content" | "attachments" | "none">("unknown");
+  const imageSupport = useRef<"unknown" | "attachments" | "none">("unknown");
 
-  async function probeImageSupport(): Promise<"content" | "attachments" | "none"> {
+  async function probeImageSupport(): Promise<"attachments" | "none"> {
     if (imageSupport.current !== "unknown") return imageSupport.current;
 
-    // Try chat.capabilities RPC (if gateway supports it)
-    try {
-      const caps = await rpc.call("chat.capabilities", {}) as Record<string, unknown>;
-      if (caps?.images || caps?.multimodal || caps?.contentBlocks) {
-        imageSupport.current = "content";
-        return "content";
-      }
-    } catch { /* not supported, probe manually */ }
-
-    // Probe: try sending content blocks to a no-op test
-    try {
-      await rpc.call("chat.send", {
-        sessionKey: `probe-${Date.now()}`,
-        idempotencyKey: `probe-${Date.now()}`,
-        content: [{ type: "text", text: "ping" }],
-      });
-      imageSupport.current = "content";
-      return "content";
-    } catch {
-      // Gateway rejected `content` param — no image support
-      imageSupport.current = "none";
-      return "none";
-    }
+    // Gateway supports images via the `attachments` parameter
+    imageSupport.current = "attachments";
+    return "attachments";
   }
 
   // Forward a message to another gateway via the RPC pool
@@ -1496,13 +1476,14 @@ function ChatView({ rootDir, serviceState, lastError, startProgress, hidden, gat
 
       if (images.length > 0) {
         const support = await probeImageSupport();
-        if (support === "content") {
-          const contentBlocks: object[] = images.map((img) => ({
+        if (support === "attachments") {
+          const attachments = images.map((img) => ({
             type: "image",
-            source: { type: "base64", media_type: img.mediaType, data: img.base64 },
+            mimeType: img.mediaType,
+            fileName: img.name,
+            content: img.base64,
           }));
-          contentBlocks.push({ type: "text", text: fullText || "Please describe this image." });
-          result = await rpc.call("chat.send", { ...baseParams, content: contentBlocks });
+          result = await rpc.call("chat.send", { ...baseParams, message: fullText || "Please describe this image.", attachments });
         } else {
           result = await rpc.call("chat.send", { ...baseParams, message: fullText || "Please describe this image." });
         }
@@ -1703,24 +1684,20 @@ function ChatView({ rootDir, serviceState, lastError, startProgress, hidden, gat
       let result: unknown;
 
       if (images.length > 0) {
-        // Probe Gateway image support (cached after first call)
         const support = await probeImageSupport();
 
-        if (support === "content") {
-          // Gateway supports content blocks — send multimodal
-          const contentBlocks: object[] = images.map((img) => ({
+        if (support === "attachments") {
+          const attachments = images.map((img) => ({
             type: "image",
-            source: {
-              type: "base64",
-              media_type: img.mediaType,
-              data: img.base64,
-            },
+            mimeType: img.mediaType,
+            fileName: img.name,
+            content: img.base64,
           }));
-          contentBlocks.push({ type: "text", text: fullText || "Please describe this image." });
 
           result = await rpc.call("chat.send", {
             ...baseParams,
-            content: contentBlocks,
+            message: fullText || "Please describe this image.",
+            attachments,
           });
         } else {
           // Gateway does NOT support multimodal — send text with file paths as fallback
