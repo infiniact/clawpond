@@ -648,9 +648,9 @@ fn apply_snapshot(snapshot: PondSnapshot, state: &State<AppState>) -> Result<(),
 }
 
 /// Copy a file to {root_dir}/workspace/tmp/, creating the directory if needed.
-/// Returns the destination path inside the container: /home/node/.openclaw/workspace/tmp/{filename}
+/// Returns the workspace path: Docker container path or local host path depending on gateway_type.
 #[tauri::command]
-pub fn copy_to_workspace(root_dir: String, source_path: String) -> Result<String, String> {
+pub fn copy_to_workspace(root_dir: String, source_path: String, gateway_type: Option<String>) -> Result<String, String> {
     let expanded_root = shellexpand::tilde(&root_dir).to_string();
     let tmp_dir = std::path::Path::new(&expanded_root).join("workspace/tmp");
     std::fs::create_dir_all(&tmp_dir)
@@ -685,18 +685,23 @@ pub fn copy_to_workspace(root_dir: String, source_path: String) -> Result<String
     std::fs::copy(src, &dest)
         .map_err(|e| format!("Failed to copy file: {}", e))?;
 
-    // Return the container-relative path
+    // Return the path appropriate for the gateway type
     let filename = dest.file_name().unwrap().to_string_lossy();
-    Ok(format!("/home/node/.openclaw/workspace/tmp/{}", filename))
+    let workspace_path = match gateway_type.as_deref() {
+        Some("local") => format!("{}/workspace/tmp/{}", expanded_root, filename),
+        _ => format!("/home/node/.openclaw/workspace/tmp/{}", filename),
+    };
+    Ok(workspace_path)
 }
 
 /// Save base64-encoded data to {root_dir}/workspace/tmp/{file_name}.
-/// Returns the container path: /home/node/.openclaw/workspace/tmp/{filename}
+/// Returns the workspace path: Docker container path or local host path depending on gateway_type.
 #[tauri::command]
 pub fn save_base64_to_workspace(
     root_dir: String,
     file_name: String,
     base64_data: String,
+    gateway_type: Option<String>,
 ) -> Result<String, String> {
     use base64::Engine;
 
@@ -735,7 +740,11 @@ pub fn save_base64_to_workspace(
         .map_err(|e| format!("Failed to write file: {}", e))?;
 
     let filename = dest.file_name().unwrap().to_string_lossy();
-    Ok(format!("/home/node/.openclaw/workspace/tmp/{}", filename))
+    let workspace_path = match gateway_type.as_deref() {
+        Some("local") => format!("{}/workspace/tmp/{}", expanded_root, filename),
+        _ => format!("/home/node/.openclaw/workspace/tmp/{}", filename),
+    };
+    Ok(workspace_path)
 }
 
 /// Resolve the OPENCLAW_WORKSPACE_DIR from the .env file in root_dir.
