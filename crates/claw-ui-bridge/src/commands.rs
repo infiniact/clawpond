@@ -809,13 +809,14 @@ pub fn list_workspace_agents(root_dir: String) -> Result<WorkspaceAgentsInfo, St
     let config_path = std::path::Path::new(&expanded).join("config/openclaw.json");
     let content = match std::fs::read_to_string(&config_path) {
         Ok(c) => c,
-        Err(_) => return Ok(WorkspaceAgentsInfo { agents: Vec::new(), allowed: Vec::new() }),
+        Err(_) => return Ok(WorkspaceAgentsInfo { agents: Vec::new(), allowed: Vec::new(), agent_emojis: std::collections::HashMap::new() }),
     };
     let json: serde_json::Value =
         serde_json::from_str(&content).map_err(|e| format!("Failed to parse openclaw.json: {}", e))?;
 
     let mut agents = Vec::new();
     let mut allowed = Vec::new();
+    let mut agent_emojis = std::collections::HashMap::new();
 
     if let Some(list) = json.pointer("/agents/list").and_then(|v| v.as_array()) {
         for entry in list {
@@ -831,19 +832,25 @@ pub fn list_workspace_agents(root_dir: String) -> Result<WorkspaceAgentsInfo, St
                     }
                 } else {
                     agents.push(id.to_string());
+                    // Read identity.emoji if present
+                    if let Some(emoji) = entry.pointer("/identity/emoji").and_then(|v| v.as_str()) {
+                        agent_emojis.insert(id.to_string(), emoji.to_string());
+                    }
                 }
             }
         }
     }
     agents.sort();
     allowed.sort();
-    Ok(WorkspaceAgentsInfo { agents, allowed })
+    Ok(WorkspaceAgentsInfo { agents, allowed, agent_emojis })
 }
 
 #[derive(Serialize)]
 pub struct WorkspaceAgentsInfo {
     pub agents: Vec<String>,
     pub allowed: Vec<String>,
+    #[serde(rename = "agentEmojis")]
+    pub agent_emojis: std::collections::HashMap<String, String>,
 }
 
 /// Toggle an agent in/out of the main agent's `subagents.allowAgents[]` in `openclaw.json`.

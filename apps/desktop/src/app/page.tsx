@@ -511,9 +511,22 @@ export default function Home() {
         if (cancelled) break;
         if (!gw.configured || !gw.rootDir) continue;
         try {
-          const info = await invoke<{ agents: string[]; allowed: string[] }>("list_workspace_agents", { rootDir: gw.rootDir });
+          const info = await invoke<{ agents: string[]; allowed: string[]; agentEmojis: Record<string, string> }>("list_workspace_agents", { rootDir: gw.rootDir });
           if (!cancelled) {
             setGatewayAgents((prev) => ({ ...prev, [gw.id]: info }));
+            // Merge discovered emojis into agentIcons (only if no user-picked icon exists)
+            if (info.agentEmojis) {
+              setAgentIcons((prev) => {
+                const next = { ...prev };
+                for (const [agent, emoji] of Object.entries(info.agentEmojis)) {
+                  const key = `${gw.id}:${agent}`;
+                  if (!next[key]) {
+                    next[key] = emoji;
+                  }
+                }
+                return next;
+              });
+            }
           }
         } catch { /* ignore */ }
       }
@@ -921,8 +934,20 @@ export default function Home() {
                 if (!g.rootDir) return;
                 try {
                   const { invoke } = await import("@tauri-apps/api/core");
-                  const info = await invoke<{ agents: string[]; allowed: string[] }>("list_workspace_agents", { rootDir: g.rootDir });
+                  const info = await invoke<{ agents: string[]; allowed: string[]; agentEmojis: Record<string, string> }>("list_workspace_agents", { rootDir: g.rootDir });
                   setGatewayAgents((prev) => ({ ...prev, [g.id]: info }));
+                  if (info.agentEmojis) {
+                    setAgentIcons((prev) => {
+                      const next = { ...prev };
+                      for (const [agent, emoji] of Object.entries(info.agentEmojis)) {
+                        const key = `${g.id}:${agent}`;
+                        if (!next[key]) {
+                          next[key] = emoji;
+                        }
+                      }
+                      return next;
+                    });
+                  }
                 } catch { /* ignore */ }
               }}
             />

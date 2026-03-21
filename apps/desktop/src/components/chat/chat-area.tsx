@@ -170,6 +170,31 @@ export function ChatArea({
     ? [...new Set([...agents, ...discoveredAgents])]
     : [...discoveredAgents];
 
+  // Elapsed times for running agents
+  const [elapsedTimes, setElapsedTimes] = useState<Record<string, number>>({});
+  useEffect(() => {
+    const timer = setInterval(() => {
+      const elapsed: Record<string, number> = {};
+      for (const [agent, data] of Object.entries(agentTaskInfo)) {
+        elapsed[agent] = Math.floor((Date.now() - data.startedAt) / 1000);
+      }
+      setElapsedTimes(elapsed);
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [agentTaskInfo]);
+
+  // Sort agents: running first
+  const sortedAgents = [...allAgents].sort((a, b) => {
+    const aRunning = runningAgents.has(a) ? 0 : 1;
+    const bRunning = runningAgents.has(b) ? 0 : 1;
+    if (aRunning !== bRunning) return aRunning - bRunning;
+    return a.localeCompare(b);
+  });
+
+  // Task preview popover state
+  const [taskPopover, setTaskPopover] = useState<{ agentName: string; x: number; y: number } | null>(null);
+  const taskPopoverRef = useRef<HTMLDivElement>(null);
+
   // Emoji picker state for agent icon editing
   const [emojiPicker, setEmojiPicker] = useState<{ agentName: string; x: number; y: number } | null>(null);
   const [emojiSearch, setEmojiSearch] = useState("");
@@ -179,9 +204,9 @@ export function ChatArea({
   const [agentMenu, setAgentMenu] = useState<{ agentName: string; x: number; y: number } | null>(null);
   const agentMenuRef = useRef<HTMLDivElement>(null);
 
-  // Close emoji picker or agent menu on click outside
+  // Close emoji picker, agent menu, or task popover on click outside
   useEffect(() => {
-    if (!emojiPicker && !agentMenu) return;
+    if (!emojiPicker && !agentMenu && !taskPopover) return;
     const handler = (e: MouseEvent) => {
       if (emojiPicker && emojiPickerRef.current && !emojiPickerRef.current.contains(e.target as Node)) {
         setEmojiPicker(null);
@@ -191,10 +216,13 @@ export function ChatArea({
       if (agentMenu && agentMenuRef.current && !agentMenuRef.current.contains(e.target as Node)) {
         setAgentMenu(null);
       }
+      if (taskPopover && taskPopoverRef.current && !taskPopoverRef.current.contains(e.target as Node)) {
+        setTaskPopover(null);
+      }
     };
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
-  }, [emojiPicker, agentMenu]);
+  }, [emojiPicker, agentMenu, taskPopover]);
 
   const handleAgentDoubleClick = useCallback((agentName: string, e: React.MouseEvent) => {
     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
@@ -247,26 +275,62 @@ export function ChatArea({
 
   return (
     <div className={`flex min-w-0 flex-1 flex-col bg-bg-base${hidden ? " hidden" : ""}`}>
-      {/* ── Top bar: Agent Info Panel ── */}
-      {allAgents.length > 0 && (
-        <AgentInfoPanel
-          allAgents={allAgents}
-          runningAgents={runningAgents}
-          agents={agents}
-          allowedAgents={allowedAgents}
-          agentIcons={agentIcons}
-          gatewayId={gatewayId}
-          agentTaskInfo={agentTaskInfo}
-          onAgentDoubleClick={handleAgentDoubleClick}
-        />
-      )}
-
-      {/* ── Top bar: Usage Heatmap (shown when no agents or always) ── */}
-      <div className="relative z-10 flex h-10 shrink-0 items-center overflow-visible border-b border-border-subtle px-3">
+      {/* ── Top bar: Agent pills + Usage Heatmap ── */}
+      <div className="relative z-10 flex h-10 shrink-0 items-center gap-2 overflow-visible border-b border-border-subtle px-3">
         {showChat && (
-          <div className="flex min-w-0 flex-1 items-center justify-center">
-            <UsageHeatmap gatewayId={gatewayId} />
-          </div>
+          <>
+            {allAgents.length > 0 && (
+              <div className="flex items-center gap-1 overflow-x-auto shrink-0">
+                {sortedAgents.slice(0, 5).map((agent) => {
+                  const iconKey = `${gatewayId}:${agent}`;
+                  const icon = agentIcons?.[iconKey] || "🤖";
+                  const isRunning = runningAgents.has(agent);
+                  const isInList = agents?.includes(agent);
+                  const elapsed = elapsedTimes[agent];
+                  const taskInfo = agentTaskInfo[agent];
+
+                  return (
+                    <button
+                      key={agent}
+                      className={`relative flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] font-medium transition-colors hover:bg-bg-hover ring-1 ${isInList ? "text-text-secondary ring-border-subtle" : "text-text-ghost ring-border-subtle/50 ring-dashed"} ${isRunning ? "bg-accent-emerald/5" : ""}`}
+                      title={`Agent: ${agent}${isRunning ? " (running)" : ""}${isInList ? (allowedAgents?.includes(agent) ? " (allowed)" : " (disabled)") : " (not in workspace)"}`}
+                      onClick={(e) => {
+                        if (isRunning && taskInfo) {
+                          const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                          setTaskPopover({ agentName: agent, x: rect.left + rect.width / 2, y: rect.bottom + 4 });
+                        }
+                      }}
+                      onDoubleClick={(e) => handleAgentDoubleClick(agent, e)}
+                      onContextMenu={(e) => { e.preventDefault(); handleAgentDoubleClick(agent, e); }}
+                    >
+                      <span className="relative text-[12px] leading-none">
+                        {icon}
+                        {isRunning ? (
+                          <span className="absolute -right-0.5 -top-0.5 block h-[4px] w-[4px] rounded-full bg-accent-emerald ring-1 ring-bg-base animate-pulse" />
+                        ) : (
+                          <span className={`absolute -right-0.5 -top-0.5 block h-[4px] w-[4px] rounded-full ring-1 ring-bg-base ${isInList && allowedAgents?.includes(agent) ? "bg-text-ghost" : "bg-text-ghost/40"}`} />
+                        )}
+                      </span>
+                      <span className="max-w-[60px] truncate">{agent}</span>
+                      {isRunning && (
+                        <span className="ml-0.5 text-[9px] text-accent-emerald font-mono">
+                          {elapsed != null ? formatElapsed(elapsed) : ""}
+                        </span>
+                      )}
+                    </button>
+                  );
+                })}
+                {sortedAgents.length > 5 && (
+                  <span className="text-[10px] text-text-ghost px-0.5">
+                    +{sortedAgents.length - 5}
+                  </span>
+                )}
+              </div>
+            )}
+            <div className="flex min-w-0 flex-1 items-center justify-center">
+              <UsageHeatmap gatewayId={gatewayId} />
+            </div>
+          </>
         )}
       </div>
 
@@ -356,6 +420,51 @@ export function ChatArea({
         </div>
       )}
 
+      {/* Task preview popover for running agents */}
+      {taskPopover && (() => {
+        const tpAgent = taskPopover.agentName;
+        const tpInfo = agentTaskInfo[tpAgent];
+        const tpElapsed = elapsedTimes[tpAgent];
+        const tpIcon = agentIcons?.[`${gatewayId}:${tpAgent}`] || "🤖";
+        if (!tpInfo) return null;
+        return (
+          <div
+            ref={taskPopoverRef}
+            className="fixed z-[999] w-[260px] rounded-lg bg-bg-surface p-3 shadow-xl ring-1 ring-border-default"
+            style={{ left: taskPopover.x - 130, top: taskPopover.y }}
+          >
+            <div className="flex items-start gap-2">
+              <span className="mt-0.5 text-[12px] text-text-ghost">
+                {tpIcon}
+              </span>
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-2">
+                  <span className="text-[11px] font-medium text-text-secondary">{tpAgent}</span>
+                  <span className="flex items-center gap-1 text-[10px] text-accent-emerald">
+                    <span className="inline-block h-[4px] w-[4px] rounded-full bg-accent-emerald animate-pulse" />
+                    running
+                  </span>
+                  {tpElapsed != null && (
+                    <span className="text-[10px] font-mono text-text-ghost">{formatElapsed(tpElapsed)}</span>
+                  )}
+                </div>
+                <p className="mt-0.5 truncate text-[11px] text-text-tertiary">
+                  &ldquo;{tpInfo.text}&rdquo;
+                </p>
+              </div>
+              <button
+                onClick={() => setTaskPopover(null)}
+                className="shrink-0 text-[11px] text-text-ghost transition-colors hover:text-text-secondary"
+              >
+                <svg className="h-3.5 w-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                  <path d="M4 4l8 8M12 4l-8 8" />
+                </svg>
+              </button>
+            </div>
+          </div>
+        );
+      })()}
+
       {/* ── Content ── */}
       <div className={`flex min-h-0 flex-1 flex-col ${showWizard ? "" : "hidden"}`}>
         <ConfigWizard
@@ -373,6 +482,11 @@ export function ChatArea({
           allowedAgents={allowedAgents || []}
           runningAgents={runningAgents}
           agentIcons={agentIcons || {}}
+          agentTaskInfo={agentTaskInfo}
+          gatewayId={gatewayId}
+          rootDir={rootDir}
+          onRefreshAgents={onRefreshAgents}
+          onAgentIconChange={onAgentIconChange}
         >
           <ChatView rootDir={rootDir} serviceState={serviceState} lastError={lastError} startProgress={startProgress} hidden={hidden} gatewayId={gatewayId} gatewayName={gatewayName} gatewayEmoji={gatewayEmoji} gatewayType={gatewayType} onBusyChange={onBusyChange} securityOfficerId={securityOfficerId} agents={agents} agentIcons={agentIcons} onRunningAgentsChange={setRunningAgents} onDiscoveredAgentsChange={setDiscoveredAgents} onAgentTaskInfoChange={setAgentTaskInfo} />
         </SplitPane>
@@ -388,6 +502,11 @@ function SplitPane({
   allowedAgents,
   runningAgents,
   agentIcons,
+  agentTaskInfo,
+  gatewayId,
+  rootDir,
+  onRefreshAgents,
+  onAgentIconChange,
   children,
 }: {
   showChat: boolean;
@@ -395,6 +514,11 @@ function SplitPane({
   allowedAgents: string[];
   runningAgents: Set<string>;
   agentIcons: Record<string, string>;
+  agentTaskInfo: Record<string, { text: string; startedAt: number }>;
+  gatewayId: string;
+  rootDir: string | null;
+  onRefreshAgents?: () => void;
+  onAgentIconChange?: (agentName: string, emoji: string) => void;
   children: React.ReactNode;
 }) {
   const [leftRatio, setLeftRatio] = useState(0.6);
@@ -449,6 +573,11 @@ function SplitPane({
           allowedAgents={allowedAgents}
           runningAgents={runningAgents}
           agentIcons={agentIcons}
+          agentTaskInfo={agentTaskInfo}
+          gatewayId={gatewayId}
+          rootDir={rootDir}
+          onRefreshAgents={onRefreshAgents}
+          onAgentIconChange={onAgentIconChange}
         />
       </div>
     </div>
@@ -461,133 +590,6 @@ function formatElapsed(seconds: number): string {
   const m = Math.floor(seconds / 60);
   const s = seconds % 60;
   return `${m}m${s}s`;
-}
-
-/** Agent info panel: shows agent cards with status, elapsed time, and task summary.
- *  Compact mode (default): single row of pills.
- *  Expanded mode: shows task text preview for a selected running agent.
- */
-function AgentInfoPanel({
-  allAgents,
-  runningAgents,
-  agents,
-  allowedAgents,
-  agentIcons,
-  gatewayId,
-  agentTaskInfo,
-  onAgentDoubleClick,
-}: {
-  allAgents: string[];
-  runningAgents: Set<string>;
-  agents?: string[];
-  allowedAgents?: string[];
-  agentIcons?: Record<string, string>;
-  gatewayId: string;
-  agentTaskInfo: Record<string, { text: string; startedAt: number }>;
-  onAgentDoubleClick: (agentName: string, e: React.MouseEvent) => void;
-}) {
-  const [expandedAgent, setExpandedAgent] = useState<string | null>(null);
-  const [elapsedTimes, setElapsedTimes] = useState<Record<string, number>>({});
-
-  // Update elapsed times every second
-  useEffect(() => {
-    const timer = setInterval(() => {
-      const elapsed: Record<string, number> = {};
-      for (const [agent, data] of Object.entries(agentTaskInfo)) {
-        elapsed[agent] = Math.floor((Date.now() - data.startedAt) / 1000);
-      }
-      setElapsedTimes(elapsed);
-    }, 1000);
-    return () => clearInterval(timer);
-  }, [agentTaskInfo]);
-
-  // Sort: running agents first
-  const sortedAgents = [...allAgents].sort((a, b) => {
-    const aRunning = runningAgents.has(a) ? 0 : 1;
-    const bRunning = runningAgents.has(b) ? 0 : 1;
-    if (aRunning !== bRunning) return aRunning - bRunning;
-    return a.localeCompare(b);
-  });
-
-  const isExpanded = expandedAgent !== null;
-
-  return (
-    <div className="shrink-0 border-b border-border-subtle px-3">
-      {/* Compact row */}
-      <div className="flex h-10 items-center gap-1.5 overflow-x-auto">
-        {sortedAgents.map((agent) => {
-          const iconKey = `${gatewayId}:${agent}`;
-          const icon = agentIcons?.[iconKey] || "🤖";
-          const isRunning = runningAgents.has(agent);
-          const isInList = agents?.includes(agent);
-          const isAllowed = allowedAgents?.includes(agent);
-          const elapsed = elapsedTimes[agent];
-          const taskInfo = agentTaskInfo[agent];
-          const isExpandedAgent = expandedAgent === agent;
-
-          return (
-            <button
-              key={agent}
-              className={`relative flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] font-medium transition-colors hover:bg-bg-hover ring-1 ${isInList ? "text-text-secondary ring-border-subtle" : "text-text-ghost ring-border-subtle/50 ring-dashed"} ${isRunning ? "bg-accent-emerald/5" : ""}`}
-              title={`Agent: ${agent}${isRunning ? " (running)" : ""}${isInList ? (isAllowed ? " (allowed)" : " (disabled)") : " (not in workspace)"}`}
-              onClick={() => setExpandedAgent(isExpandedAgent ? null : (isRunning ? agent : null))}
-              onDoubleClick={(e) => onAgentDoubleClick(agent, e)}
-              onContextMenu={(e) => { e.preventDefault(); onAgentDoubleClick(agent, e); }}
-            >
-              <span className="relative text-[13px] leading-none">
-                {icon}
-                {isRunning ? (
-                  <span className="absolute -right-0.5 -top-0.5 block h-[5px] w-[5px] rounded-full bg-accent-emerald ring-1 ring-bg-base animate-pulse" />
-                ) : (
-                  <span className={`absolute -right-0.5 -top-0.5 block h-[5px] w-[5px] rounded-full ring-1 ring-bg-base ${isInList && isAllowed ? "bg-text-ghost" : "bg-text-ghost/40"}`} />
-                )}
-              </span>
-              <span className="max-w-[80px] truncate">{agent}</span>
-              {isRunning && (
-                <span className="ml-0.5 text-[10px] text-accent-emerald font-mono">
-                  {elapsed != null ? formatElapsed(elapsed) : ""}
-                </span>
-              )}
-            </button>
-          );
-        })}
-      </div>
-
-      {/* Expanded view: show task text preview for selected running agent */}
-      {isExpanded && expandedAgent && agentTaskInfo[expandedAgent] && (
-        <div className="px-1 pb-2">
-          <div className="flex items-start gap-2 rounded-lg bg-bg-elevated px-3 py-2 ring-1 ring-border-subtle">
-            <span className="mt-0.5 text-[12px] text-text-ghost">
-              {agentIcons?.[`${gatewayId}:${expandedAgent}`] || "🤖"}
-            </span>
-            <div className="min-w-0 flex-1">
-              <div className="flex items-center gap-2">
-                <span className="text-[11px] font-medium text-text-secondary">{expandedAgent}</span>
-                <span className="flex items-center gap-1 text-[10px] text-accent-emerald">
-                  <span className="inline-block h-[4px] w-[4px] rounded-full bg-accent-emerald animate-pulse" />
-                  running
-                </span>
-                {elapsedTimes[expandedAgent] != null && (
-                  <span className="text-[10px] font-mono text-text-ghost">{formatElapsed(elapsedTimes[expandedAgent])}</span>
-                )}
-              </div>
-              <p className="mt-0.5 truncate text-[11px] text-text-tertiary">
-                &ldquo;{agentTaskInfo[expandedAgent].text}&rdquo;
-              </p>
-            </div>
-            <button
-              onClick={() => setExpandedAgent(null)}
-              className="shrink-0 text-[11px] text-text-ghost transition-colors hover:text-text-secondary"
-            >
-              <svg className="h-3.5 w-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-                <path d="M4 4l8 8M12 4l-8 8" />
-              </svg>
-            </button>
-          </div>
-        </div>
-      )}
-    </div>
-  );
 }
 
 function toStored(msg: Message): StoredMessage {
