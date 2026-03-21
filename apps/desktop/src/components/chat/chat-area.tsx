@@ -482,6 +482,7 @@ function toStored(msg: Message): StoredMessage {
     ...(msg.sourceGateway ? { sourceGateway: msg.sourceGateway } : {}),
     ...(msg.mentions ? { mentions: msg.mentions } : {}),
     ...(msg.agentName ? { agentName: msg.agentName } : {}),
+    ...(msg.images ? { images: msg.images } : {}),
   };
 }
 
@@ -495,6 +496,7 @@ function fromStored(msg: StoredMessage): Message {
     ...(msg.sourceGateway ? { sourceGateway: msg.sourceGateway } : {}),
     ...(msg.mentions ? { mentions: msg.mentions } : {}),
     ...(msg.agentName ? { agentName: msg.agentName } : {}),
+    ...(msg.images ? { images: msg.images } : {}),
   };
 }
 

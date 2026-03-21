@@ -13,6 +13,7 @@ export type StoredMessage = {
   sourceGateway?: { id: string; name: string; emoji: string };
   mentions?: string[];
   agentName?: string;
+  images?: { name: string; mediaType: string; base64: string }[];
 };
 
 const PAGE_SIZE = 100;
