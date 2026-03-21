@@ -162,6 +162,8 @@ export function ChatArea({
 
   // Track which agents are currently running (reported by ChatView via RPC events)
   const [runningAgents, setRunningAgents] = useState<Set<string>>(new Set());
+  // Track agent task info (text summary + start time) from ChatView
+  const [agentTaskInfo, setAgentTaskInfo] = useState<Record<string, { text: string; startedAt: number }>>({});
   // Track agents discovered from messages but not in the workspace list
   const [discoveredAgents, setDiscoveredAgents] = useState<Set<string>>(new Set());
   const allAgents = agents && agents.length > 0
@@ -245,41 +247,22 @@ export function ChatArea({
 
   return (
     <div className={`flex min-w-0 flex-1 flex-col bg-bg-base${hidden ? " hidden" : ""}`}>
-      {/* ── Top bar with toggle buttons ── */}
-      <div className="relative z-10 flex h-10 shrink-0 items-center overflow-visible border-b border-border-subtle px-3">
-        {/* Agent bar — left */}
-        <div className="flex shrink-0 items-center gap-1.5 overflow-x-auto">
-          {allAgents.length > 0 && allAgents.map((agent) => {
-            const iconKey = `${gatewayId}:${agent}`;
-            const icon = agentIcons?.[iconKey] || "🤖";
-            const isRunning = runningAgents.has(agent);
-            const isInList = agents?.includes(agent);
-            const isAllowed = allowedAgents?.includes(agent);
-            return (
-              <button
-                key={agent}
-                className={`relative flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] font-medium transition-colors hover:bg-bg-hover ring-1 ${isInList ? "text-text-secondary ring-border-subtle" : "text-text-ghost ring-border-subtle/50 ring-dashed"}`}
-                title={`Agent: ${agent}${isRunning ? " (running)" : ""}${isInList ? (isAllowed ? " (allowed)" : " (disabled)") : " (not in workspace)"}`}
-                onDoubleClick={(e) => handleAgentDoubleClick(agent, e)}
-                onContextMenu={(e) => { e.preventDefault(); handleAgentDoubleClick(agent, e); }}
-              >
-                <span className="relative text-[13px] leading-none">
-                  {icon}
-                  <span className={`absolute -right-0.5 -top-0.5 block h-[5px] w-[5px] rounded-full ring-1 ring-bg-base ${isRunning ? "bg-accent-emerald" : isInList && isAllowed ? "bg-text-ghost" : "bg-text-ghost/40"}`} />
-                </span>
-                <span className="max-w-[80px] truncate">{agent}</span>
-                {isRunning && (
-                  <svg className="ml-0.5 h-[10px] w-[10px] animate-spin text-accent-emerald" viewBox="0 0 16 16" fill="none">
-                    <circle cx="8" cy="8" r="6" stroke="currentColor" strokeWidth="2" strokeOpacity="0.25" />
-                    <path d="M14 8a6 6 0 0 0-6-6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
-                  </svg>
-                )}
-              </button>
-            );
-          })}
-        </div>
+      {/* ── Top bar: Agent Info Panel ── */}
+      {allAgents.length > 0 && (
+        <AgentInfoPanel
+          allAgents={allAgents}
+          runningAgents={runningAgents}
+          agents={agents}
+          allowedAgents={allowedAgents}
+          agentIcons={agentIcons}
+          gatewayId={gatewayId}
+          agentTaskInfo={agentTaskInfo}
+          onAgentDoubleClick={handleAgentDoubleClick}
+        />
+      )}
 
-        {/* Usage heatmap — centered */}
+      {/* ── Top bar: Usage Heatmap (shown when no agents or always) ── */}
+      <div className="relative z-10 flex h-10 shrink-0 items-center overflow-visible border-b border-border-subtle px-3">
         {showChat && (
           <div className="flex min-w-0 flex-1 items-center justify-center">
             <UsageHeatmap gatewayId={gatewayId} />
@@ -391,7 +374,7 @@ export function ChatArea({
           runningAgents={runningAgents}
           agentIcons={agentIcons || {}}
         >
-          <ChatView rootDir={rootDir} serviceState={serviceState} lastError={lastError} startProgress={startProgress} hidden={hidden} gatewayId={gatewayId} gatewayName={gatewayName} gatewayEmoji={gatewayEmoji} gatewayType={gatewayType} onBusyChange={onBusyChange} securityOfficerId={securityOfficerId} agents={agents} agentIcons={agentIcons} onRunningAgentsChange={setRunningAgents} onDiscoveredAgentsChange={setDiscoveredAgents} />
+          <ChatView rootDir={rootDir} serviceState={serviceState} lastError={lastError} startProgress={startProgress} hidden={hidden} gatewayId={gatewayId} gatewayName={gatewayName} gatewayEmoji={gatewayEmoji} gatewayType={gatewayType} onBusyChange={onBusyChange} securityOfficerId={securityOfficerId} agents={agents} agentIcons={agentIcons} onRunningAgentsChange={setRunningAgents} onDiscoveredAgentsChange={setDiscoveredAgents} onAgentTaskInfoChange={setAgentTaskInfo} />
         </SplitPane>
       )}
     </div>
@@ -472,6 +455,141 @@ function SplitPane({
   );
 }
 
+/** Elapsed time formatter */
+function formatElapsed(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`;
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  return `${m}m${s}s`;
+}
+
+/** Agent info panel: shows agent cards with status, elapsed time, and task summary.
+ *  Compact mode (default): single row of pills.
+ *  Expanded mode: shows task text preview for a selected running agent.
+ */
+function AgentInfoPanel({
+  allAgents,
+  runningAgents,
+  agents,
+  allowedAgents,
+  agentIcons,
+  gatewayId,
+  agentTaskInfo,
+  onAgentDoubleClick,
+}: {
+  allAgents: string[];
+  runningAgents: Set<string>;
+  agents?: string[];
+  allowedAgents?: string[];
+  agentIcons?: Record<string, string>;
+  gatewayId: string;
+  agentTaskInfo: Record<string, { text: string; startedAt: number }>;
+  onAgentDoubleClick: (agentName: string, e: React.MouseEvent) => void;
+}) {
+  const [expandedAgent, setExpandedAgent] = useState<string | null>(null);
+  const [elapsedTimes, setElapsedTimes] = useState<Record<string, number>>({});
+
+  // Update elapsed times every second
+  useEffect(() => {
+    const timer = setInterval(() => {
+      const elapsed: Record<string, number> = {};
+      for (const [agent, data] of Object.entries(agentTaskInfo)) {
+        elapsed[agent] = Math.floor((Date.now() - data.startedAt) / 1000);
+      }
+      setElapsedTimes(elapsed);
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [agentTaskInfo]);
+
+  // Sort: running agents first
+  const sortedAgents = [...allAgents].sort((a, b) => {
+    const aRunning = runningAgents.has(a) ? 0 : 1;
+    const bRunning = runningAgents.has(b) ? 0 : 1;
+    if (aRunning !== bRunning) return aRunning - bRunning;
+    return a.localeCompare(b);
+  });
+
+  const isExpanded = expandedAgent !== null;
+
+  return (
+    <div className="shrink-0 border-b border-border-subtle px-3">
+      {/* Compact row */}
+      <div className="flex h-10 items-center gap-1.5 overflow-x-auto">
+        {sortedAgents.map((agent) => {
+          const iconKey = `${gatewayId}:${agent}`;
+          const icon = agentIcons?.[iconKey] || "🤖";
+          const isRunning = runningAgents.has(agent);
+          const isInList = agents?.includes(agent);
+          const isAllowed = allowedAgents?.includes(agent);
+          const elapsed = elapsedTimes[agent];
+          const taskInfo = agentTaskInfo[agent];
+          const isExpandedAgent = expandedAgent === agent;
+
+          return (
+            <button
+              key={agent}
+              className={`relative flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] font-medium transition-colors hover:bg-bg-hover ring-1 ${isInList ? "text-text-secondary ring-border-subtle" : "text-text-ghost ring-border-subtle/50 ring-dashed"} ${isRunning ? "bg-accent-emerald/5" : ""}`}
+              title={`Agent: ${agent}${isRunning ? " (running)" : ""}${isInList ? (isAllowed ? " (allowed)" : " (disabled)") : " (not in workspace)"}`}
+              onClick={() => setExpandedAgent(isExpandedAgent ? null : (isRunning ? agent : null))}
+              onDoubleClick={(e) => onAgentDoubleClick(agent, e)}
+              onContextMenu={(e) => { e.preventDefault(); onAgentDoubleClick(agent, e); }}
+            >
+              <span className="relative text-[13px] leading-none">
+                {icon}
+                {isRunning ? (
+                  <span className="absolute -right-0.5 -top-0.5 block h-[5px] w-[5px] rounded-full bg-accent-emerald ring-1 ring-bg-base animate-pulse" />
+                ) : (
+                  <span className={`absolute -right-0.5 -top-0.5 block h-[5px] w-[5px] rounded-full ring-1 ring-bg-base ${isInList && isAllowed ? "bg-text-ghost" : "bg-text-ghost/40"}`} />
+                )}
+              </span>
+              <span className="max-w-[80px] truncate">{agent}</span>
+              {isRunning && (
+                <span className="ml-0.5 text-[10px] text-accent-emerald font-mono">
+                  {elapsed != null ? formatElapsed(elapsed) : ""}
+                </span>
+              )}
+            </button>
+          );
+        })}
+      </div>
+
+      {/* Expanded view: show task text preview for selected running agent */}
+      {isExpanded && expandedAgent && agentTaskInfo[expandedAgent] && (
+        <div className="px-1 pb-2">
+          <div className="flex items-start gap-2 rounded-lg bg-bg-elevated px-3 py-2 ring-1 ring-border-subtle">
+            <span className="mt-0.5 text-[12px] text-text-ghost">
+              {agentIcons?.[`${gatewayId}:${expandedAgent}`] || "🤖"}
+            </span>
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-2">
+                <span className="text-[11px] font-medium text-text-secondary">{expandedAgent}</span>
+                <span className="flex items-center gap-1 text-[10px] text-accent-emerald">
+                  <span className="inline-block h-[4px] w-[4px] rounded-full bg-accent-emerald animate-pulse" />
+                  running
+                </span>
+                {elapsedTimes[expandedAgent] != null && (
+                  <span className="text-[10px] font-mono text-text-ghost">{formatElapsed(elapsedTimes[expandedAgent])}</span>
+                )}
+              </div>
+              <p className="mt-0.5 truncate text-[11px] text-text-tertiary">
+                &ldquo;{agentTaskInfo[expandedAgent].text}&rdquo;
+              </p>
+            </div>
+            <button
+              onClick={() => setExpandedAgent(null)}
+              className="shrink-0 text-[11px] text-text-ghost transition-colors hover:text-text-secondary"
+            >
+              <svg className="h-3.5 w-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                <path d="M4 4l8 8M12 4l-8 8" />
+              </svg>
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function toStored(msg: Message): StoredMessage {
   return {
     id: msg.id,
@@ -500,7 +618,7 @@ function fromStored(msg: StoredMessage): Message {
   };
 }
 
-function ChatView({ rootDir, serviceState, lastError, startProgress, hidden, gatewayId, gatewayName, gatewayEmoji, gatewayType, onBusyChange, securityOfficerId, agents, agentIcons, onRunningAgentsChange, onDiscoveredAgentsChange }: { rootDir: string | null; serviceState: string; lastError?: string; startProgress?: ComposeStartProgress; hidden?: boolean; gatewayId: string; gatewayName: string; gatewayEmoji: string; gatewayType?: "local" | "docker"; onBusyChange?: (busy: boolean) => void; securityOfficerId?: string; agents?: string[]; agentIcons?: Record<string, string>; onRunningAgentsChange?: (agents: Set<string>) => void; onDiscoveredAgentsChange?: (agents: Set<string>) => void }) {
+function ChatView({ rootDir, serviceState, lastError, startProgress, hidden, gatewayId, gatewayName, gatewayEmoji, gatewayType, onBusyChange, securityOfficerId, agents, agentIcons, onRunningAgentsChange, onDiscoveredAgentsChange, onAgentTaskInfoChange }: { rootDir: string | null; serviceState: string; lastError?: string; startProgress?: ComposeStartProgress; hidden?: boolean; gatewayId: string; gatewayName: string; gatewayEmoji: string; gatewayType?: "local" | "docker"; onBusyChange?: (busy: boolean) => void; securityOfficerId?: string; agents?: string[]; agentIcons?: Record<string, string>; onRunningAgentsChange?: (agents: Set<string>) => void; onDiscoveredAgentsChange?: (agents: Set<string>) => void; onAgentTaskInfoChange?: (info: Record<string, { text: string; startedAt: number }>) => void }) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [connected, setConnected] = useState(false);
@@ -522,10 +640,48 @@ function ChatView({ rootDir, serviceState, lastError, startProgress, hidden, gat
   const runningAgentsRef = useRef<Set<string>>(new Set());
   const onRunningAgentsChangeRef = useRef(onRunningAgentsChange);
   onRunningAgentsChangeRef.current = onRunningAgentsChange;
-  const markAgentRunning = useCallback((agentName: string) => {
+
+  // Track agent task info (text summary + start time) and elapsed times
+  const [agentTaskInfo, setAgentTaskInfo] = useState<Record<string, { text: string; startedAt: number }>>({});
+  const [agentElapsedTimes, setAgentElapsedTimes] = useState<Record<string, number>>({});
+  const agentTaskInfoRef = useRef(agentTaskInfo);
+  agentTaskInfoRef.current = agentTaskInfo;
+  const onAgentTaskInfoChangeRef = useRef(onAgentTaskInfoChange);
+  onAgentTaskInfoChangeRef.current = onAgentTaskInfoChange;
+
+  // Sync agentTaskInfo to parent ChatArea
+  useEffect(() => {
+    onAgentTaskInfoChangeRef.current?.(agentTaskInfo);
+  }, [agentTaskInfo]);
+
+  // Timer: update elapsed times every second for running agents
+  useEffect(() => {
+    const timer = setInterval(() => {
+      const info = agentTaskInfoRef.current;
+      const elapsed: Record<string, number> = {};
+      for (const [agent, data] of Object.entries(info)) {
+        elapsed[agent] = Math.floor((Date.now() - data.startedAt) / 1000);
+      }
+      setAgentElapsedTimes(elapsed);
+    }, 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  const markAgentRunning = useCallback((agentName: string, delta?: string) => {
+    let changed = false;
     if (!runningAgentsRef.current.has(agentName)) {
       runningAgentsRef.current = new Set(runningAgentsRef.current).add(agentName);
       onRunningAgentsChangeRef.current?.(runningAgentsRef.current);
+      changed = true;
+    }
+    // Update task info with latest text
+    if (delta) {
+      setAgentTaskInfo((prev) => {
+        const existing = prev[agentName];
+        const newText = existing ? existing.text + delta : delta;
+        const text = newText.slice(0, 50);
+        return { ...prev, [agentName]: { text, startedAt: existing?.startedAt || Date.now() } };
+      });
     }
   }, []);
   const markAgentStopped = useCallback((agentName: string) => {
@@ -535,6 +691,12 @@ function ChatView({ rootDir, serviceState, lastError, startProgress, hidden, gat
       runningAgentsRef.current = next;
       onRunningAgentsChangeRef.current?.(next);
     }
+    // Clear task info for stopped agent
+    setAgentTaskInfo((prev) => {
+      const next = { ...prev };
+      delete next[agentName];
+      return next;
+    });
   }, []);
 
   // Track discovered agents from RPC events and propagate to parent
@@ -1029,7 +1191,7 @@ function ChatView({ rootDir, serviceState, lastError, startProgress, hidden, gat
           const eventAgent = event.payload?.agent || event.payload?.agentId || event.payload?.workspace || event.payload?.data?.agent || event.payload?.data?.workspace;
           const resolvedAgent: string | undefined = typeof eventAgent === "string" && eventAgent ? eventAgent : undefined;
           if (resolvedAgent) {
-            markAgentRunning(resolvedAgent);
+            markAgentRunning(resolvedAgent, delta);
             markAgentDiscovered(resolvedAgent);
           }
           if (!streamMsgId.current) {
